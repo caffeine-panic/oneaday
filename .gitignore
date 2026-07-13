@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.cache/
+target/
+src-tauri/binaries/registry-core-*
+.DS_Store

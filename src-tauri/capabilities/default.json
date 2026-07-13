@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the Atlas Registry main window",
+  "windows": ["main"],
+  "permissions": ["core:default", "shell:allow-stdin-write", "shell:allow-kill", { "identifier": "shell:allow-execute", "allow": [{ "name": "registry-core", "sidecar": true }] }]
+}
