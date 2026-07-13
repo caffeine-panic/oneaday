@@ -11,7 +11,13 @@ struct RpcResponse {
 #[serde(rename_all = "camelCase")]
 struct Capabilities {
     protocol_version: String,
-    adapters: Vec<String>,
+    adapters: Vec<AdapterCapability>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AdapterCapability {
+    id: String,
+    status: String,
 }
 
 #[tauri::command]
@@ -20,18 +26,23 @@ async fn sidecar_capabilities(app: tauri::AppHandle) -> Result<Capabilities, Str
         .shell()
         .sidecar("registry-core")
         .map_err(|error| error.to_string())?;
-    let (mut events, child) = sidecar.spawn().map_err(|error| error.to_string())?;
+    let (mut events, mut child) = sidecar.spawn().map_err(|error| error.to_string())?;
 
     child
         .write(b"{\"jsonrpc\":\"2.0\",\"id\":\"desktop-startup\",\"method\":\"system.capabilities\"}\n")
         .map_err(|error| error.to_string())?;
 
+    let mut stdout = Vec::new();
     while let Some(event) = events.recv().await {
         match event {
             CommandEvent::Stdout(bytes) => {
-                let response: RpcResponse = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("invalid sidecar response: {error}"))?;
-                return Ok(response.result);
+                stdout.extend(bytes);
+                if let Some(newline) = stdout.iter().position(|byte| *byte == b'\n') {
+                    let response: RpcResponse = serde_json::from_slice(&stdout[..newline])
+                        .map_err(|error| format!("invalid sidecar response: {error}"))?;
+                    let _ = child.kill();
+                    return Ok(response.result);
+                }
             }
             CommandEvent::Error(message) => return Err(message),
             CommandEvent::Terminated(payload) => {

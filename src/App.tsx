@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 
 type Capabilities = {
   protocolVersion: string;
-  adapters: string[];
+  adapters: Array<{ id: string; status: "planned" | "available" }>;
 };
 
 const connections = [
@@ -75,7 +75,7 @@ export function App() {
           <button className="button wide">＋ 添加连接</button>
           <div className="capabilities">
             <div className="eyebrow">CORE ADAPTERS</div>
-            {capabilities?.adapters.map((adapter) => <span className={`badge ${adapter}`} key={adapter}>{adapter}</span>)}
+            {capabilities?.adapters.map((adapter) => <span className={`badge ${adapter.id}`} key={adapter.id}>{adapter.id} · {adapter.status}</span>)}
             {error && <p>{error}</p>}
           </div>
         </aside>

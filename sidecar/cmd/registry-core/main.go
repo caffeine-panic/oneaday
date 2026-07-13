@@ -29,8 +29,13 @@ type response struct {
 }
 
 type capabilities struct {
-	ProtocolVersion string   `json:"protocolVersion"`
-	Adapters        []string `json:"adapters"`
+	ProtocolVersion string              `json:"protocolVersion"`
+	Adapters        []adapterCapability `json:"adapters"`
+}
+
+type adapterCapability struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
 }
 
 func main() {
@@ -57,7 +62,11 @@ func serve(input io.Reader, output io.Writer) error {
 		case "system.capabilities":
 			res.Result = capabilities{
 				ProtocolVersion: protocolVersion,
-				Adapters:        []string{"etcd", "zookeeper", "nacos"},
+				Adapters: []adapterCapability{
+					{ID: "etcd", Status: "planned"},
+					{ID: "zookeeper", Status: "planned"},
+					{ID: "nacos", Status: "planned"},
+				},
 			}
 		default:
 			res.Error = &rpcError{Code: -32601, Message: "method not found"}

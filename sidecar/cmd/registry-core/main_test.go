@@ -12,8 +12,11 @@ type response struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      string `json:"id"`
 	Result  struct {
-		ProtocolVersion string   `json:"protocolVersion"`
-		Adapters        []string `json:"adapters"`
+		ProtocolVersion string `json:"protocolVersion"`
+		Adapters        []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"adapters"`
 	} `json:"result"`
 }
 
@@ -52,8 +55,11 @@ func TestSidecarReportsRegistryCapabilities(t *testing.T) {
 	if got.Result.ProtocolVersion != "0.1.0" {
 		t.Fatalf("protocol version = %q", got.Result.ProtocolVersion)
 	}
-	wantAdapters := []string{"etcd", "zookeeper", "nacos"}
+	wantAdapters := []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}{{"etcd", "planned"}, {"zookeeper", "planned"}, {"nacos", "planned"}}
 	if !reflect.DeepEqual(got.Result.Adapters, wantAdapters) {
-		t.Fatalf("adapters = %v, want %v", got.Result.Adapters, wantAdapters)
+		t.Fatalf("adapters = %#v, want %#v", got.Result.Adapters, wantAdapters)
 	}
 }
