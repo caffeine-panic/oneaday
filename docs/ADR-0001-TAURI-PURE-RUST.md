@@ -14,7 +14,7 @@ Atlas Registry 需要以桌面应用形式统一访问 etcd、ZooKeeper 和 Naco
 - etcd：`etcd-client` 0.19，启用系统 TLS roots。
 - ZooKeeper：`zookeeper-client` 0.11.1，启用 Tokio 与 TLS。
 - Nacos：`nacos-sdk` 0.8；Config 客户端负责连接与单配置读取，2.x legacy 管理接口和 3.x Admin API 负责配置分页列表；Naming 能力在后续垂直切片接入。
-- `RegistryCatalog` 是前端与协议实现之间的公共边界，返回 adapter descriptor，并提供连接探测。
+- `RegistryCatalog` 声明 adapter descriptor 与能力；`RegistryService` 持有会话，并执行可取消的连接探测、浏览和读取操作。
 - 公共能力可以统一；lease、transaction、ACL、ephemeral、namespace、service 等原生能力不能抹平。
 
 ## 结果

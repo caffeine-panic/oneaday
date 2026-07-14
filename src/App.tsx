@@ -9,6 +9,7 @@ import {
   loadConnectionProfiles,
   newConnectionId,
   openConnection,
+  probeConnection,
   readResource,
   registryCapabilities,
   saveConnectionProfiles,
@@ -74,6 +75,15 @@ function connectionLabel(adapter: AdapterId) {
   return adapter === "zookeeper" ? "ZK" : adapter;
 }
 
+function normalizedProfile(profile: ConnectionProfile): ConnectionProfile {
+  return {
+    ...profile,
+    name: profile.name.trim(),
+    endpoint: profile.endpoint.trim(),
+    namespace: profile.namespace.trim(),
+  };
+}
+
 function addressLabel(address: ResourceAddress) {
   switch (address.type) {
     case "root":
@@ -102,6 +112,7 @@ export function App() {
   const [activeOperation, setActiveOperation] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
   const [form, setForm] = useState<ConnectionProfile>(emptyForm);
 
   const selectedProfile = profiles.find((profile) => profile.id === selectedId);
@@ -184,12 +195,7 @@ export function App() {
   };
 
   const saveAndConnect = async () => {
-    const candidate = {
-      ...form,
-      name: form.name.trim(),
-      endpoint: form.endpoint.trim(),
-      namespace: form.namespace.trim(),
-    };
+    const candidate = normalizedProfile(form);
     if (!candidate.name || !candidate.endpoint) {
       setMessage("连接名称和 endpoint 不能为空");
       return;
@@ -202,6 +208,28 @@ export function App() {
       await connectAndLoad(candidate);
     } catch (reason) {
       setMessage(errorMessage(reason));
+    }
+  };
+
+  const testConnection = async () => {
+    const candidate = normalizedProfile(form);
+    if (!candidate.name || !candidate.endpoint) {
+      setMessage("连接名称和 endpoint 不能为空");
+      return;
+    }
+    setBusy(true);
+    setTestingConnection(true);
+    setMessage(undefined);
+    const operationId = startOperation();
+    try {
+      const result = await probeConnection(candidate, operationId);
+      setMessage(`连接测试成功：${result.endpoint}`);
+    } catch (reason) {
+      setMessage(isCancelled(reason) ? "连接测试已取消" : errorMessage(reason));
+    } finally {
+      finishOperation(operationId);
+      setTestingConnection(false);
+      setBusy(false);
     }
   };
 
@@ -464,9 +492,9 @@ export function App() {
       {message && <button className="toast" onClick={() => setMessage(undefined)}>{message}</button>}
 
       {dialogOpen && (
-        <div className="dialog-backdrop" onMouseDown={() => setDialogOpen(false)}>
+        <div className="dialog-backdrop" onMouseDown={() => { if (!testingConnection) setDialogOpen(false); }}>
           <section className="dialog" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="dialog-heading"><div><span className="eyebrow">CONNECTION</span><h2>新建连接</h2></div><button className="icon-button" onClick={() => setDialogOpen(false)}>×</button></div>
+            <div className="dialog-heading"><div><span className="eyebrow">CONNECTION</span><h2>新建连接</h2></div><button className="icon-button" disabled={testingConnection} onClick={() => setDialogOpen(false)}>×</button></div>
             <label>类型
               <select value={form.adapter} onChange={(event) => {
                 const adapter = event.target.value as AdapterId;
@@ -486,7 +514,11 @@ export function App() {
               </div>
             )}
             <p className="form-note">当前切片支持无认证连接。凭据与 TLS 将进入系统安全存储，不会写入浏览器 localStorage。</p>
-            <div className="dialog-actions"><button className="button" onClick={() => setDialogOpen(false)}>取消</button><button className="button primary" disabled={busy} onClick={() => void saveAndConnect()}>保存并连接</button></div>
+            <div className="dialog-actions">
+              <button className="button" onClick={() => testingConnection ? void cancelActiveOperation() : setDialogOpen(false)}>{testingConnection ? "取消测试" : "取消"}</button>
+              <button className="button" disabled={busy} onClick={() => void testConnection()}>测试连接</button>
+              <button className="button primary" disabled={busy} onClick={() => void saveAndConnect()}>保存并连接</button>
+            </div>
           </section>
         </div>
       )}

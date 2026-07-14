@@ -1,6 +1,6 @@
 use atlas_registry_lib::registry::{
-    AdapterId, AdapterStatus, Capability, EncodedValue, RegistryCatalog, RegistryErrorCode,
-    ValueEncoding,
+    AdapterId, AdapterStatus, Capability, ConnectionProfile, EncodedValue, NacosApiVersion,
+    OperationId, RegistryCatalog, RegistryErrorCode, RegistryService, ValueEncoding,
 };
 
 #[test]
@@ -51,8 +51,18 @@ fn values_larger_than_the_inline_limit_are_kept_out_of_the_webview() {
 
 #[test]
 fn connection_probe_rejects_a_blank_endpoint_before_using_a_protocol_client() {
-    let error = tauri::async_runtime::block_on(RegistryCatalog.probe(AdapterId::Etcd, "   "))
-        .expect_err("a blank endpoint must be rejected");
+    let error = tauri::async_runtime::block_on(RegistryService::default().probe_cancellable(
+        OperationId::new("blank-probe".to_owned()).expect("operation id should be valid"),
+        ConnectionProfile {
+            id: "blank-endpoint".to_owned(),
+            name: "Blank endpoint".to_owned(),
+            adapter: AdapterId::Etcd,
+            endpoint: "   ".to_owned(),
+            namespace: String::new(),
+            nacos_api_version: NacosApiVersion::V2,
+        },
+    ))
+    .expect_err("a blank endpoint must be rejected");
 
     assert_eq!(error.code, RegistryErrorCode::Validation);
     assert_eq!(error.message, "endpoint cannot be blank");

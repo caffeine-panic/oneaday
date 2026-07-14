@@ -687,3 +687,22 @@ fn adapter_mismatch(adapter: AdapterId, address: &ResourceAddress) -> RegistryEr
         "resource address {address:?} does not belong to {adapter:?}"
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{etcd_cursor_after, etcd_immediate_child};
+
+    #[test]
+    fn etcd_cursor_keeps_exact_keys_and_folder_prefixes_in_separate_ranges() {
+        let exact = etcd_immediate_child(b"", b"a").expect("exact key should be visible");
+        let dotted = etcd_immediate_child(b"", b"a.foo").expect("sibling key should be visible");
+        let nested = etcd_immediate_child(b"", b"a/x").expect("nested key should be visible");
+
+        assert_eq!(exact, (b"a".to_vec(), true, false));
+        assert_eq!(dotted, (b"a.foo".to_vec(), true, false));
+        assert_eq!(nested, (b"a/".to_vec(), false, true));
+        assert!(etcd_cursor_after(&exact.0, exact.2) < dotted.0);
+        assert!(etcd_cursor_after(&dotted.0, dotted.2) < b"a/x".to_vec());
+        assert!(etcd_cursor_after(&nested.0, nested.2) > b"a/x".to_vec());
+    }
+}

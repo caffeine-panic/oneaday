@@ -297,28 +297,6 @@ impl RegistryCatalog {
             })
             .collect()
     }
-
-    pub async fn probe(
-        &self,
-        adapter: AdapterId,
-        endpoint: &str,
-    ) -> Result<ConnectionProbe, RegistryError> {
-        let profile = ConnectionProfile {
-            id: "probe".to_owned(),
-            name: "Connection probe".to_owned(),
-            adapter,
-            endpoint: endpoint.to_owned(),
-            namespace: String::new(),
-            nacos_api_version: NacosApiVersion::default(),
-        };
-
-        RegistrySession::connect(&profile).await?;
-
-        Ok(ConnectionProbe {
-            adapter,
-            endpoint: endpoint.trim().to_owned(),
-        })
-    }
 }
 
 #[derive(Clone, Default)]
@@ -328,6 +306,21 @@ pub struct RegistryService {
 }
 
 impl RegistryService {
+    pub async fn probe_cancellable(
+        &self,
+        operation_id: OperationId,
+        mut profile: ConnectionProfile,
+    ) -> Result<ConnectionProbe, RegistryError> {
+        profile.validate()?;
+        let adapter = profile.adapter;
+        let endpoint = profile.endpoint.clone();
+        self.run_operation(operation_id, async move {
+            RegistrySession::connect(&profile).await?;
+            Ok(ConnectionProbe { adapter, endpoint })
+        })
+        .await
+    }
+
     pub async fn open(
         &self,
         mut profile: ConnectionProfile,
@@ -467,5 +460,42 @@ impl RegistryService {
         };
         self.operations.write().await.remove(&operation_id);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OperationId, RegistryError, RegistryErrorCode, RegistryService};
+
+    #[tokio::test]
+    async fn cancellation_interrupts_an_operation_and_removes_its_registration() {
+        let service = RegistryService::default();
+        let operation_id = OperationId::new("pending-probe".to_owned()).unwrap();
+        let running_service = service.clone();
+        let running_id = operation_id.clone();
+        let task = tokio::spawn(async move {
+            running_service
+                .run_operation(
+                    running_id,
+                    std::future::pending::<Result<(), RegistryError>>(),
+                )
+                .await
+        });
+
+        for _ in 0..10 {
+            if service.operations.read().await.contains_key(&operation_id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(service.operations.read().await.contains_key(&operation_id));
+        assert!(service.cancel(&operation_id).await);
+
+        let error = task
+            .await
+            .expect("operation task should finish")
+            .expect_err("cancelled operation should return an error");
+        assert_eq!(error.code, RegistryErrorCode::Cancelled);
+        assert!(!service.cancel(&operation_id).await);
     }
 }

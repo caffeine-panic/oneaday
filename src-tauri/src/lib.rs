@@ -1,9 +1,9 @@
 pub mod registry;
 
 use registry::{
-    AdapterDescriptor, AdapterId, ConnectionProbe, ConnectionProfile, ConnectionSession,
-    OperationId, RegistryCatalog, RegistryError, RegistryService, ResourceAddress,
-    ResourceDocument, ResourcePage, ResourcePageRequest,
+    AdapterDescriptor, ConnectionProbe, ConnectionProfile, ConnectionSession, OperationId,
+    RegistryCatalog, RegistryError, RegistryService, ResourceAddress, ResourceDocument,
+    ResourcePage, ResourcePageRequest,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -13,19 +13,14 @@ fn registry_capabilities() -> Vec<AdapterDescriptor> {
     RegistryCatalog.descriptors()
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProbeConnectionRequest {
-    adapter: AdapterId,
-    endpoint: String,
-}
-
 #[tauri::command]
 async fn probe_connection(
-    request: ProbeConnectionRequest,
+    service: State<'_, RegistryService>,
+    profile: ConnectionProfile,
+    operation_id: String,
 ) -> Result<ConnectionProbe, RegistryError> {
-    RegistryCatalog
-        .probe(request.adapter, &request.endpoint)
+    service
+        .probe_cancellable(OperationId::new(operation_id)?, profile)
         .await
 }
 

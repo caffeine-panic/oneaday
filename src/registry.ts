@@ -25,6 +25,11 @@ export type ConnectionSession = {
   endpoint: string;
 };
 
+export type ConnectionProbe = {
+  adapter: AdapterId;
+  endpoint: string;
+};
+
 export type ResourceAddress =
   | { type: "root" }
   | { type: "etcd"; keyBase64: string }
@@ -76,6 +81,10 @@ export function loadConnectionProfiles() {
 
 export function saveConnectionProfiles(profiles: ConnectionProfile[]) {
   return invoke<void>("save_connection_profiles", { profiles });
+}
+
+export function probeConnection(profile: ConnectionProfile, operationId: string) {
+  return invoke<ConnectionProbe>("probe_connection", { profile, operationId });
 }
 
 export function openConnection(profile: ConnectionProfile, operationId: string) {
