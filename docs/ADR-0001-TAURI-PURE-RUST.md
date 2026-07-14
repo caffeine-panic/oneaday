@@ -25,6 +25,6 @@ Atlas Registry 需要以桌面应用形式统一访问 etcd、ZooKeeper 和 Naco
 - `etcd-client` 构建依赖 `protoc`，开发和 CI 环境必须显式安装。
 - 首发前必须验证 mTLS、ZooKeeper ACL/TLS/SASL、watch 重连、Nacos 2.x/3.x 分版管理 API。
 
-## 当前边界
+## 当前进展
 
-本次落地完成 adapter catalog、真实客户端链接和连接探测，catalog 仅声明已经实现的 `probe` 能力。节点浏览、条件写入、删除、监听、凭据存储与长连接池属于后续垂直切片。
+技术 Spike 已结束。正式开发的第一条产品链路已经完成长生命周期 session、按需浏览与资源读取，catalog 声明 `probe`、`browse` 和 `read`。条件写入、删除、监听、凭据存储与认证属于后续垂直切片。

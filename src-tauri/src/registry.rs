@@ -1,11 +1,14 @@
-use std::time::Duration;
+mod adapters;
 
-use nacos_sdk::api::{
-    config::ConfigServiceBuilder, error::Error as NacosError, props::ClientProps,
-};
+use std::{collections::BTreeMap, sync::Arc};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+use adapters::RegistrySession;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AdapterId {
     Etcd,
@@ -23,6 +26,8 @@ pub enum AdapterStatus {
 #[serde(rename_all = "camelCase")]
 pub enum Capability {
     Probe,
+    Browse,
+    Read,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -33,6 +38,56 @@ pub struct AdapterDescriptor {
     pub capabilities: Vec<Capability>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NacosApiVersion {
+    #[default]
+    V2,
+    V3,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionProfile {
+    pub id: String,
+    pub name: String,
+    pub adapter: AdapterId,
+    pub endpoint: String,
+    #[serde(default)]
+    pub namespace: String,
+    #[serde(default)]
+    pub nacos_api_version: NacosApiVersion,
+}
+
+impl ConnectionProfile {
+    fn validate(&mut self) -> Result<(), RegistryError> {
+        self.id = self.id.trim().to_owned();
+        self.name = self.name.trim().to_owned();
+        self.endpoint = self.endpoint.trim().to_owned();
+        self.namespace = self.namespace.trim().to_owned();
+
+        if self.id.is_empty() {
+            return Err(RegistryError::validation("connection id cannot be blank"));
+        }
+        if self.name.is_empty() {
+            return Err(RegistryError::validation("connection name cannot be blank"));
+        }
+        if self.endpoint.is_empty() {
+            return Err(RegistryError::validation("endpoint cannot be blank"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionSession {
+    pub id: String,
+    pub name: String,
+    pub adapter: AdapterId,
+    pub endpoint: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionProbe {
@@ -40,59 +95,135 @@ pub struct ConnectionProbe {
     pub endpoint: String,
 }
 
-trait RegistryAdapter {
-    async fn probe(&self, endpoint: &str) -> Result<(), String>;
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ResourceAddress {
+    Root,
+    Etcd { key_base64: String },
+    Zookeeper { path: String },
+    NacosConfig { group: String, data_id: String },
 }
 
-struct EtcdAdapter;
-struct ZookeeperAdapter;
-struct NacosAdapter;
-
-impl RegistryAdapter for EtcdAdapter {
-    async fn probe(&self, endpoint: &str) -> Result<(), String> {
-        let mut client = etcd_client::Client::connect([endpoint], None)
-            .await
-            .map_err(|error| format!("etcd connection failed: {error}"))?;
-
-        client
-            .status()
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("etcd status request failed: {error}"))
-    }
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceNode {
+    pub address: ResourceAddress,
+    pub name: String,
+    pub readable: bool,
+    /// `None` means that the backend does not expose the child count without another request.
+    pub has_children: Option<bool>,
 }
 
-impl RegistryAdapter for ZookeeperAdapter {
-    async fn probe(&self, endpoint: &str) -> Result<(), String> {
-        zookeeper_client::Client::connect(endpoint)
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("ZooKeeper connection failed: {error}"))
-    }
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourcePage {
+    pub parent: ResourceAddress,
+    pub items: Vec<ResourceNode>,
+    pub next_cursor: Option<String>,
 }
 
-impl RegistryAdapter for NacosAdapter {
-    async fn probe(&self, endpoint: &str) -> Result<(), String> {
-        let config_service = ConfigServiceBuilder::new(
-            ClientProps::new()
-                .server_addr(endpoint)
-                .namespace("")
-                .app_name("atlas-registry"),
-        )
-        .build()
-        .await
-        .map_err(|error| format!("Nacos connection failed: {error}"))?;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ValueEncoding {
+    Utf8,
+    Base64,
+}
 
-        match config_service
-            .get_config(
-                "__atlas_registry_probe__".to_owned(),
-                "DEFAULT_GROUP".to_owned(),
-            )
-            .await
-        {
-            Ok(_) | Err(NacosError::ConfigNotFound(_)) => Ok(()),
-            Err(error) => Err(format!("Nacos connection failed: {error}")),
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncodedValue {
+    pub content: String,
+    pub encoding: ValueEncoding,
+    pub size_bytes: usize,
+}
+
+impl EncodedValue {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        match std::str::from_utf8(bytes) {
+            Ok(content) => Self {
+                content: content.to_owned(),
+                encoding: ValueEncoding::Utf8,
+                size_bytes: bytes.len(),
+            },
+            Err(_) => Self {
+                content: STANDARD.encode(bytes),
+                encoding: ValueEncoding::Base64,
+                size_bytes: bytes.len(),
+            },
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceDocument {
+    pub address: ResourceAddress,
+    pub name: String,
+    pub value: EncodedValue,
+    pub content_type: Option<String>,
+    pub version: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RegistryErrorCode {
+    Validation,
+    NotConnected,
+    Unsupported,
+    NotFound,
+    Network,
+    InvalidResponse,
+    Timeout,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryError {
+    pub code: RegistryErrorCode,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl RegistryError {
+    pub(crate) fn new(
+        code: RegistryErrorCode,
+        message: impl Into<String>,
+        retryable: bool,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            retryable,
+        }
+    }
+
+    pub(crate) fn validation(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::Validation, message, false)
+    }
+
+    pub(crate) fn network(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::Network, message, true)
+    }
+
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::NotFound, message, false)
+    }
+
+    pub(crate) fn invalid_response(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::InvalidResponse, message, false)
+    }
+
+    pub(crate) fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::Unsupported, message, false)
+    }
+
+    pub(crate) fn timeout(operation: &str) -> Self {
+        Self::new(
+            RegistryErrorCode::Timeout,
+            format!("{operation} timed out after 8 seconds"),
+            true,
+        )
     }
 }
 
@@ -101,23 +232,14 @@ pub struct RegistryCatalog;
 
 impl RegistryCatalog {
     pub fn descriptors(&self) -> Vec<AdapterDescriptor> {
-        vec![
-            AdapterDescriptor {
-                id: AdapterId::Etcd,
+        [AdapterId::Etcd, AdapterId::Zookeeper, AdapterId::Nacos]
+            .into_iter()
+            .map(|id| AdapterDescriptor {
+                id,
                 status: AdapterStatus::Available,
-                capabilities: vec![Capability::Probe],
-            },
-            AdapterDescriptor {
-                id: AdapterId::Zookeeper,
-                status: AdapterStatus::Available,
-                capabilities: vec![Capability::Probe],
-            },
-            AdapterDescriptor {
-                id: AdapterId::Nacos,
-                status: AdapterStatus::Available,
-                capabilities: vec![Capability::Probe],
-            },
-        ]
+                capabilities: vec![Capability::Probe, Capability::Browse, Capability::Read],
+            })
+            .collect()
     }
 
     pub async fn probe(
@@ -125,24 +247,94 @@ impl RegistryCatalog {
         adapter: AdapterId,
         endpoint: &str,
     ) -> Result<ConnectionProbe, String> {
-        let endpoint = endpoint.trim();
-        if endpoint.is_empty() {
-            return Err("endpoint cannot be blank".into());
-        }
+        let profile = ConnectionProfile {
+            id: "probe".to_owned(),
+            name: "Connection probe".to_owned(),
+            adapter,
+            endpoint: endpoint.to_owned(),
+            namespace: String::new(),
+            nacos_api_version: NacosApiVersion::default(),
+        };
 
-        tokio::time::timeout(Duration::from_secs(8), async {
-            match adapter {
-                AdapterId::Etcd => EtcdAdapter.probe(endpoint).await,
-                AdapterId::Zookeeper => ZookeeperAdapter.probe(endpoint).await,
-                AdapterId::Nacos => NacosAdapter.probe(endpoint).await,
-            }
-        })
-        .await
-        .map_err(|_| "connection probe timed out after 8 seconds".to_owned())??;
+        RegistrySession::connect(&profile)
+            .await
+            .map_err(|error| error.message)?;
 
         Ok(ConnectionProbe {
             adapter,
-            endpoint: endpoint.to_owned(),
+            endpoint: endpoint.trim().to_owned(),
         })
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct RegistryService {
+    sessions: Arc<RwLock<BTreeMap<String, RegistrySession>>>,
+}
+
+impl RegistryService {
+    pub async fn open(
+        &self,
+        mut profile: ConnectionProfile,
+    ) -> Result<ConnectionSession, RegistryError> {
+        profile.validate()?;
+        let session = RegistrySession::connect(&profile).await?;
+        let summary = ConnectionSession {
+            id: profile.id.clone(),
+            name: profile.name,
+            adapter: profile.adapter,
+            endpoint: profile.endpoint,
+        };
+        self.sessions
+            .write()
+            .await
+            .insert(summary.id.clone(), session);
+        Ok(summary)
+    }
+
+    pub async fn close(&self, connection_id: &str) -> Result<(), RegistryError> {
+        self.sessions
+            .write()
+            .await
+            .remove(connection_id)
+            .map(|_| ())
+            .ok_or_else(|| Self::not_connected(connection_id))
+    }
+
+    pub async fn list(
+        &self,
+        connection_id: &str,
+        parent: ResourceAddress,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> Result<ResourcePage, RegistryError> {
+        let session = self.session(connection_id).await?;
+        session.list(parent, cursor, limit.clamp(1, 200)).await
+    }
+
+    pub async fn read(
+        &self,
+        connection_id: &str,
+        address: ResourceAddress,
+    ) -> Result<ResourceDocument, RegistryError> {
+        let session = self.session(connection_id).await?;
+        session.read(address).await
+    }
+
+    async fn session(&self, connection_id: &str) -> Result<RegistrySession, RegistryError> {
+        self.sessions
+            .read()
+            .await
+            .get(connection_id)
+            .cloned()
+            .ok_or_else(|| Self::not_connected(connection_id))
+    }
+
+    fn not_connected(connection_id: &str) -> RegistryError {
+        RegistryError::new(
+            RegistryErrorCode::NotConnected,
+            format!("connection '{connection_id}' is not open"),
+            true,
+        )
     }
 }
