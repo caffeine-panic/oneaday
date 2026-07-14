@@ -5,16 +5,21 @@
 当前处于技术 Spike 阶段，已建立以下垂直链路：
 
 ```text
-React/TypeScript UI → Tauri 2 Rust command → Go sidecar JSON-RPC
+React/TypeScript UI → Tauri 2 command → Rust RegistryCatalog → native protocol adapters
 ```
 
 ## 本地开发
 
-需要 Node.js、Go 1.26+、Rust stable，以及对应平台的 Tauri 系统依赖。
+需要 Node.js、Rust stable、`protoc`，以及对应平台的 Tauri 系统依赖。
+
+macOS 可安装：
+
+```bash
+brew install rust protobuf
+```
 
 ```bash
 npm install
-npm run sidecar:build
 npm run tauri dev
 ```
 
@@ -22,13 +27,13 @@ npm run tauri dev
 
 ```bash
 npm run build
-GOCACHE="$PWD/.cache/go-build" go test ./...
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-技术选型依据见 [docs/TECH_STACK_RESEARCH.md](docs/TECH_STACK_RESEARCH.md)。原始界面方案位于 `prototype/registry-client/`，正式界面以方案 A（三栏资源管理器）为基础。
+最终架构决策见 [docs/ADR-0001-TAURI-PURE-RUST.md](docs/ADR-0001-TAURI-PURE-RUST.md)，早期技术调研见 [docs/TECH_STACK_RESEARCH.md](docs/TECH_STACK_RESEARCH.md)。原始界面方案位于 `prototype/registry-client/`，正式界面以方案 A（三栏资源管理器）为基础。
 
 ## Spike 边界
 
-- 已实现：方案 A 的 React 页面、Tauri 工程、Go sidecar 构建、进程级 JSON-RPC 能力握手。
-- 尚未实现：真实 etcd/ZooKeeper/Nacos 连接、凭据保存、写操作和事件监听。
-- sidecar 当前使用换行分隔 JSON-RPC；进入大事件流实现前需升级为长度前缀 framing。
+- 已实现：方案 A 的 React 页面、Tauri 工程、纯 Rust adapter catalog、三种协议客户端依赖和真实连接探测。
+- 尚未实现：凭据保存、节点读写、分页浏览、事件监听和生产环境保护。
+- adapter 只统一连接与资源操作外形；etcd lease/transaction、ZooKeeper ACL/ephemeral、Nacos namespace/service 保留各自语义。

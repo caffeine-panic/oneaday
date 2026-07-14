@@ -1,5 +1,7 @@
 # 统一注册中心桌面客户端技术选型研究
 
+> **后续决策（2026-07-14）：** 项目已选择本文的“备选 A：Tauri 2 + 纯 Rust”。最终决策与约束见 [ADR-0001](ADR-0001-TAURI-PURE-RUST.md)。下文保留原始研究结论，作为权衡记录。
+
 > 调研日期：2026-07-13  
 > 范围：桌面端（Windows、macOS、Linux），访问 etcd、Apache ZooKeeper、Nacos。仅引用项目官方文档、官方仓库和协议资料；语言生态中没有官方实现时，明确标为社区依赖。
 
@@ -165,4 +167,3 @@ Go registry-core sidecar
 2. 三个 adapter 各实现 connect、list children/prefix、get、conditional put/set、delete、watch。
 3. 连接本地真实 etcd、ZooKeeper、Nacos 2.x；再单独接 Nacos 3.x 验证 API 分叉。
 4. 输出三平台包体/RSS/冷启动、协议覆盖和失败清单。只有 ZooKeeper 认证/TLS 或 Nacos 版本适配出现不可接受缺口时，才转向 Java sidecar 或缩小首发范围。
-

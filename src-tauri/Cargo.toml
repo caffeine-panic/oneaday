@@ -2,8 +2,7 @@
 name = "atlas-registry"
 version = "0.1.0"
 description = "A unified registry center desktop client"
-authors = ["Atlas Registry contributors"]
-edition = "2021"
+edition = "2024"
 
 [lib]
 name = "atlas_registry_lib"
@@ -13,7 +12,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+etcd-client = { version = "0.19", features = ["tls-roots"] }
+nacos-sdk = { version = "0.8", default-features = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
+zookeeper-client = { version = "0.11.1", features = ["tokio", "tls"] }

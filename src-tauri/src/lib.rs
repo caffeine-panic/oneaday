@@ -1,65 +1,34 @@
-use serde::{Deserialize, Serialize};
-use tauri_plugin_shell::{process::CommandEvent, ShellExt};
+pub mod registry;
+
+use registry::{AdapterDescriptor, AdapterId, ConnectionProbe, RegistryCatalog};
+use serde::Deserialize;
+
+#[tauri::command]
+fn registry_capabilities() -> Vec<AdapterDescriptor> {
+    RegistryCatalog::default().descriptors()
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RpcResponse {
-    result: Capabilities,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Capabilities {
-    protocol_version: String,
-    adapters: Vec<AdapterCapability>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct AdapterCapability {
-    id: String,
-    status: String,
+struct ProbeConnectionRequest {
+    adapter: AdapterId,
+    endpoint: String,
 }
 
 #[tauri::command]
-async fn sidecar_capabilities(app: tauri::AppHandle) -> Result<Capabilities, String> {
-    let sidecar = app
-        .shell()
-        .sidecar("registry-core")
-        .map_err(|error| error.to_string())?;
-    let (mut events, mut child) = sidecar.spawn().map_err(|error| error.to_string())?;
-
-    child
-        .write(b"{\"jsonrpc\":\"2.0\",\"id\":\"desktop-startup\",\"method\":\"system.capabilities\"}\n")
-        .map_err(|error| error.to_string())?;
-
-    let mut stdout = Vec::new();
-    while let Some(event) = events.recv().await {
-        match event {
-            CommandEvent::Stdout(bytes) => {
-                stdout.extend(bytes);
-                if let Some(newline) = stdout.iter().position(|byte| *byte == b'\n') {
-                    let response: RpcResponse = serde_json::from_slice(&stdout[..newline])
-                        .map_err(|error| format!("invalid sidecar response: {error}"))?;
-                    let _ = child.kill();
-                    return Ok(response.result);
-                }
-            }
-            CommandEvent::Error(message) => return Err(message),
-            CommandEvent::Terminated(payload) => {
-                return Err(format!("sidecar terminated before responding: {payload:?}"));
-            }
-            _ => {}
-        }
-    }
-
-    Err("sidecar closed without a response".into())
+async fn probe_connection(request: ProbeConnectionRequest) -> Result<ConnectionProbe, String> {
+    RegistryCatalog
+        .probe(request.adapter, &request.endpoint)
+        .await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![sidecar_capabilities])
+        .invoke_handler(tauri::generate_handler![
+            registry_capabilities,
+            probe_connection
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Atlas Registry");
 }

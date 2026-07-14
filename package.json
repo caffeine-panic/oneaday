@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "sidecar:build": "bash scripts/build-sidecar.sh",
     "tauri": "tauri"
   },
   "dependencies": {

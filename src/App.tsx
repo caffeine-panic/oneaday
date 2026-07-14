@@ -1,16 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 
-type Capabilities = {
-  protocolVersion: string;
-  adapters: Array<{ id: string; status: "planned" | "available" }>;
+type AdapterId = "etcd" | "zookeeper" | "nacos";
+
+type AdapterDescriptor = {
+  id: AdapterId;
+  status: "available";
+  capabilities: string[];
+};
+
+type ConnectionProbe = {
+  adapter: AdapterId;
+  endpoint: string;
 };
 
 const connections = [
-  { name: "生产 etcd", kind: "etcd", endpoint: "10.8.0.12:2379" },
-  { name: "订单 ZK", kind: "zookeeper", endpoint: "3 节点 · 已连接" },
-  { name: "Nacos 开发", kind: "nacos", endpoint: "dev.nacos.local" },
-];
+  { name: "生产 etcd", kind: "etcd", endpoint: "10.8.0.12:2379", summary: "10.8.0.12:2379" },
+  { name: "订单 ZK", kind: "zookeeper", endpoint: "zk-1:2181,zk-2:2181,zk-3:2181", summary: "3 节点" },
+  { name: "Nacos 开发", kind: "nacos", endpoint: "dev.nacos.local:8848", summary: "dev.nacos.local:8848" },
+] satisfies Array<{ name: string; kind: AdapterId; endpoint: string; summary: string }>;
 
 const nodes = [
   ["folder", "/services", 0],
@@ -33,16 +41,35 @@ const sampleValue = `{
 }`;
 
 export function App() {
-  const [capabilities, setCapabilities] = useState<Capabilities>();
+  const [capabilities, setCapabilities] = useState<AdapterDescriptor[]>();
   const [error, setError] = useState<string>();
+  const [selectedConnection, setSelectedConnection] = useState(0);
+  const [probeResult, setProbeResult] = useState<string>();
+  const [probing, setProbing] = useState(false);
   const [value, setValue] = useState(sampleValue);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    invoke<Capabilities>("sidecar_capabilities")
+    invoke<AdapterDescriptor[]>("registry_capabilities")
       .then(setCapabilities)
       .catch((reason: unknown) => setError(String(reason)));
   }, []);
+
+  const probeConnection = async () => {
+    const connection = connections[selectedConnection];
+    setProbing(true);
+    setProbeResult(undefined);
+    try {
+      const result = await invoke<ConnectionProbe>("probe_connection", {
+        request: { adapter: connection.kind, endpoint: connection.endpoint },
+      });
+      setProbeResult(`已连接 ${result.endpoint}`);
+    } catch (reason) {
+      setProbeResult(String(reason));
+    } finally {
+      setProbing(false);
+    }
+  };
 
   const save = () => {
     setSaved(true);
@@ -57,7 +84,7 @@ export function App() {
         <div className="top-spacer" />
         <div className={`runtime ${error ? "failed" : ""}`}>
           <span className="status-dot" />
-          {error ? "sidecar 启动失败" : capabilities ? `Core ${capabilities.protocolVersion}` : "正在启动 core…"}
+          {error ? "Rust Core 启动失败" : capabilities ? `Rust Core · ${capabilities.length} adapters` : "正在启动 Rust Core…"}
         </div>
         <button className="button primary">＋ 新建连接</button>
       </header>
@@ -66,16 +93,18 @@ export function App() {
         <aside className="connections">
           <div className="eyebrow">连接</div>
           {connections.map((connection, index) => (
-            <button className={`connection ${index === 0 ? "active" : ""}`} key={connection.name}>
+            <button className={`connection ${index === selectedConnection ? "active" : ""}`} key={connection.name} onClick={() => setSelectedConnection(index)}>
               <span className="status-dot" />
-              <span><b>{connection.name}</b><small>{connection.endpoint}</small></span>
+              <span><b>{connection.name}</b><small>{connection.summary}</small></span>
               <span className={`badge ${connection.kind}`}>{connection.kind === "zookeeper" ? "ZK" : connection.kind}</span>
             </button>
           ))}
+          <button className="button primary wide" onClick={probeConnection} disabled={probing}>{probing ? "连接中…" : "测试选中连接"}</button>
+          {probeResult && <p className="probe-result">{probeResult}</p>}
           <button className="button wide">＋ 添加连接</button>
           <div className="capabilities">
-            <div className="eyebrow">CORE ADAPTERS</div>
-            {capabilities?.adapters.map((adapter) => <span className={`badge ${adapter.id}`} key={adapter.id}>{adapter.id} · {adapter.status}</span>)}
+            <div className="eyebrow">NATIVE RUST ADAPTERS</div>
+            {capabilities?.map((adapter) => <span className={`badge ${adapter.id}`} title={adapter.capabilities.join(" · ")} key={adapter.id}>{adapter.id} · {adapter.status}</span>)}
             {error && <p>{error}</p>}
           </div>
         </aside>

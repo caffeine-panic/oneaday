@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.oneaday.atlas-registry",
   "build": {
-    "beforeDevCommand": "npm run sidecar:build",
-    "beforeBuildCommand": "npm run sidecar:build && npm run build",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
@@ -16,6 +16,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/registry-core"]
+    "icon": ["icons/icon.png"]
   }
 }
