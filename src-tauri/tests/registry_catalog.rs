@@ -1,53 +1,20 @@
-use atlas_registry_lib::registry::{AdapterDescriptor, AdapterId, RegistryCatalog};
+use atlas_registry_lib::registry::{AdapterId, AdapterStatus, Capability, RegistryCatalog};
 
 #[test]
-fn catalog_reports_the_three_native_adapters_and_their_distinct_capabilities() {
+fn catalog_reports_only_the_native_capability_that_is_implemented() {
     let descriptors = RegistryCatalog.descriptors();
 
     assert_eq!(
-        descriptors,
-        vec![
-            AdapterDescriptor {
-                id: AdapterId::Etcd,
-                status: "available",
-                capabilities: vec![
-                    "browse",
-                    "read",
-                    "write",
-                    "delete",
-                    "watch",
-                    "lease",
-                    "transaction"
-                ],
-            },
-            AdapterDescriptor {
-                id: AdapterId::Zookeeper,
-                status: "available",
-                capabilities: vec![
-                    "browse",
-                    "read",
-                    "write",
-                    "delete",
-                    "watch",
-                    "acl",
-                    "ephemeral"
-                ],
-            },
-            AdapterDescriptor {
-                id: AdapterId::Nacos,
-                status: "available",
-                capabilities: vec![
-                    "browse",
-                    "read",
-                    "write",
-                    "delete",
-                    "listen",
-                    "namespace",
-                    "service"
-                ],
-            },
-        ]
+        descriptors
+            .iter()
+            .map(|descriptor| descriptor.id)
+            .collect::<Vec<_>>(),
+        vec![AdapterId::Etcd, AdapterId::Zookeeper, AdapterId::Nacos]
     );
+    assert!(descriptors.iter().all(|descriptor| {
+        descriptor.status == AdapterStatus::Available
+            && descriptor.capabilities == vec![Capability::Probe]
+    }));
 }
 
 #[test]

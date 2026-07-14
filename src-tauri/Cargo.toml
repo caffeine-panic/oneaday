@@ -16,4 +16,5 @@ etcd-client = { version = "0.19", features = ["tls-roots"] }
 nacos-sdk = { version = "0.8", default-features = true }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["time"] }
 zookeeper-client = { version = "0.11.1", features = ["tokio", "tls"] }

@@ -235,6 +235,7 @@ dependencies = [
  "serde",
  "tauri",
  "tauri-build",
+ "tokio",
  "zookeeper-client",
 ]
 
