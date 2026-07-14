@@ -1,10 +1,11 @@
 use atlas_registry_lib::registry::{
-    AdapterId, AdapterStatus, Capability, ConnectionProfile, EncodedValue, NacosApiVersion,
-    OperationId, RegistryCatalog, RegistryErrorCode, RegistryService, ValueEncoding,
+    AdapterId, AdapterStatus, Capability, ConnectionProfile, EncodedValue, MutationValue,
+    NacosApiVersion, OperationId, RegistryCatalog, RegistryErrorCode, RegistryService,
+    ResourceAddress, ResourceMutation, ResourceSnapshot, ValueEncoding,
 };
 
 #[test]
-fn catalog_reports_probe_browse_and_read_for_each_native_adapter() {
+fn catalog_reports_read_and_safe_mutation_capabilities_for_each_native_adapter() {
     let descriptors = RegistryCatalog.descriptors();
 
     assert_eq!(
@@ -17,8 +18,121 @@ fn catalog_reports_probe_browse_and_read_for_each_native_adapter() {
     assert!(descriptors.iter().all(|descriptor| {
         descriptor.status == AdapterStatus::Available
             && descriptor.capabilities
-                == vec![Capability::Probe, Capability::Browse, Capability::Read]
+                == vec![
+                    Capability::Probe,
+                    Capability::Browse,
+                    Capability::Read,
+                    Capability::Create,
+                    Capability::Update,
+                    Capability::Delete,
+                ]
     }));
+}
+
+#[test]
+fn mutation_contract_requires_versions_and_preserves_binary_values() {
+    let address = ResourceAddress::Etcd {
+        key_base64: "L3NlcnZpY2VzL3BheW1lbnQ=".to_owned(),
+    };
+    let update = ResourceMutation::Update {
+        address: address.clone(),
+        value: MutationValue {
+            content: "/wAv".to_owned(),
+            encoding: ValueEncoding::Base64,
+        },
+        content_type: None,
+        expected_version: "42".to_owned(),
+    };
+
+    update.validate().expect("valid conditional update");
+    assert_eq!(
+        update.decoded_value().expect("binary value"),
+        [0xff, 0x00, 0x2f]
+    );
+
+    let missing_version = ResourceMutation::Delete {
+        address,
+        expected_version: "   ".to_owned(),
+    };
+    let error = missing_version
+        .validate()
+        .expect_err("delete must be conditional");
+    assert_eq!(error.code, RegistryErrorCode::Validation);
+
+    let root_create = ResourceMutation::Create {
+        address: ResourceAddress::Root,
+        value: MutationValue {
+            content: "value".to_owned(),
+            encoding: ValueEncoding::Utf8,
+        },
+        content_type: None,
+    };
+    assert_eq!(
+        root_create
+            .validate()
+            .expect_err("root cannot be written")
+            .code,
+        RegistryErrorCode::Validation
+    );
+
+    for path in ["relative/path", "/trailing/", "/double//slash", "/./dot"] {
+        let invalid_zookeeper_create = ResourceMutation::Create {
+            address: ResourceAddress::Zookeeper {
+                path: path.to_owned(),
+            },
+            value: MutationValue {
+                content: "value".to_owned(),
+                encoding: ValueEncoding::Utf8,
+            },
+            content_type: None,
+        };
+        assert_eq!(
+            invalid_zookeeper_create
+                .validate()
+                .expect_err("ZooKeeper mutation path must be canonical")
+                .code,
+            RegistryErrorCode::Validation
+        );
+    }
+}
+
+#[test]
+fn mutation_snapshots_are_stable_and_do_not_contain_resource_values() {
+    let snapshot = ResourceSnapshot::from_bytes(b"secret", Some("7".to_owned()));
+
+    assert_eq!(
+        snapshot.sha256,
+        "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"
+    );
+    assert_eq!(snapshot.size_bytes, 6);
+    assert_eq!(snapshot.encoding, ValueEncoding::Utf8);
+    assert_eq!(snapshot.version.as_deref(), Some("7"));
+    assert!(
+        !serde_json::to_string(&snapshot)
+            .expect("snapshot should serialize")
+            .contains("secret")
+    );
+}
+
+#[test]
+fn mutation_commands_require_an_open_registry_session() {
+    let mutation = ResourceMutation::Delete {
+        address: ResourceAddress::Zookeeper {
+            path: "/atlas/missing".to_owned(),
+        },
+        expected_version: "0".to_owned(),
+    };
+    let error = tauri::async_runtime::block_on(
+        RegistryService::default().mutate_cancellable(
+            OperationId::new("missing-session-mutation".to_owned())
+                .expect("operation id should be valid"),
+            "missing-session".to_owned(),
+            mutation,
+        ),
+    )
+    .expect_err("mutation requires an open session");
+
+    assert_eq!(error.code, RegistryErrorCode::NotConnected);
 }
 
 #[test]

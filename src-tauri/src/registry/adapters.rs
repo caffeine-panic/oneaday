@@ -10,8 +10,10 @@ use nacos_sdk::api::{
 use serde::Deserialize;
 
 use super::{
-    AdapterId, ConnectionProfile, EncodedValue, NacosApiVersion, RegistryError, RegistryErrorCode,
-    ResourceAddress, ResourceDocument, ResourceNode, ResourcePage,
+    AdapterId, ConnectionProfile, EncodedValue, MutationPhase, MutationResult, NacosApiVersion,
+    RegistryError, RegistryErrorCode, ResourceAddress, ResourceDocument, ResourceMutation,
+    ResourceNode, ResourcePage,
+    mutations::{mutate_etcd, mutate_nacos, mutate_zookeeper},
 };
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
@@ -25,7 +27,7 @@ pub(super) enum RegistrySession {
 
 #[derive(Clone)]
 pub(super) struct NacosSession {
-    config: ConfigService,
+    pub(super) config: ConfigService,
     http: reqwest::Client,
     endpoint: String,
     namespace: String,
@@ -81,6 +83,23 @@ impl RegistrySession {
         })
         .await
         .map_err(|_| RegistryError::timeout("resource read"))?
+    }
+
+    pub(super) async fn mutate(
+        &self,
+        mutation: ResourceMutation,
+        phase: MutationPhase,
+    ) -> Result<MutationResult, RegistryError> {
+        let timeout_phase = phase.clone();
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Etcd(client) => mutate_etcd(client.as_ref().clone(), mutation, &phase).await,
+                Self::Zookeeper(client) => mutate_zookeeper(client, mutation, &phase).await,
+                Self::Nacos(session) => mutate_nacos(session, mutation, &phase).await,
+            }
+        })
+        .await
+        .map_err(|_| timeout_phase.timeout_error())?
     }
 
     async fn connect_etcd(profile: &ConnectionProfile) -> Result<Self, RegistryError> {
@@ -328,10 +347,12 @@ async fn read_zookeeper(
         ResourceAddress::Zookeeper { path } => path.clone(),
         _ => return Err(adapter_mismatch(AdapterId::Zookeeper, &address)),
     };
-    let (data, stat) = client
-        .get_data(&path)
-        .await
-        .map_err(|error| RegistryError::network(format!("ZooKeeper read failed: {error}")))?;
+    let (data, stat) = client.get_data(&path).await.map_err(|error| match error {
+        zookeeper_client::Error::NoNode => {
+            RegistryError::not_found("ZooKeeper znode does not exist")
+        }
+        other => RegistryError::network(format!("ZooKeeper read failed: {other}")),
+    })?;
     let mut metadata = BTreeMap::new();
     metadata.insert("createdZxid".to_owned(), stat.czxid.to_string());
     metadata.insert("modifiedZxid".to_owned(), stat.mzxid.to_string());

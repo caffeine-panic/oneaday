@@ -1,5 +1,6 @@
 use atlas_registry_lib::registry::{
-    AdapterId, ConnectionProfile, NacosApiVersion, RegistryService, ResourceAddress,
+    AdapterId, ConnectionProfile, MutationValue, NacosApiVersion, RegistryService, ResourceAddress,
+    ResourceMutation, ValueEncoding,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -11,6 +12,28 @@ fn profile(adapter: AdapterId, endpoint: String) -> ConnectionProfile {
         endpoint,
         namespace: String::new(),
         nacos_api_version: NacosApiVersion::V2,
+    }
+}
+
+fn mutations_enabled() -> bool {
+    std::env::var("ATLAS_TEST_ENABLE_MUTATIONS").as_deref() == Ok("1")
+}
+
+fn unique_suffix() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos()
+    )
+}
+
+fn text_value(content: &str) -> MutationValue {
+    MutationValue {
+        content: content.to_owned(),
+        encoding: ValueEncoding::Utf8,
     }
 }
 
@@ -46,6 +69,14 @@ fn etcd_live_session_can_browse_the_root() {
                 .expect("configured etcd fixture should be readable");
             assert!(document.metadata.contains_key("modRevision"));
         }
+        if mutations_enabled() {
+            let prefix = std::env::var("ATLAS_TEST_ETCD_MUTATION_PREFIX")
+                .unwrap_or_else(|_| "/atlas-registry-live-test".to_owned());
+            let address = ResourceAddress::Etcd {
+                key_base64: STANDARD.encode(format!("{prefix}/{}", unique_suffix())),
+            };
+            assert_create_update_delete(&service, &session.id, address).await;
+        }
     });
 }
 
@@ -75,6 +106,18 @@ fn zookeeper_live_session_can_browse_the_root() {
                 .await
                 .expect("configured ZooKeeper fixture should be readable");
             assert!(document.metadata.contains_key("modifiedZxid"));
+        }
+        if mutations_enabled() {
+            let parent = std::env::var("ATLAS_TEST_ZOOKEEPER_MUTATION_PARENT")
+                .unwrap_or_else(|_| "/".to_owned());
+            let address = ResourceAddress::Zookeeper {
+                path: format!(
+                    "{}/atlas-registry-live-test-{}",
+                    parent.trim_end_matches('/'),
+                    unique_suffix()
+                ),
+            };
+            assert_create_update_delete(&service, &session.id, address).await;
         }
     });
 }
@@ -116,5 +159,102 @@ fn nacos_live_session_can_browse_the_config_list() {
                 .expect("configured Nacos fixture should be readable");
             assert!(document.metadata.contains_key("md5"));
         }
+        if mutations_enabled() {
+            let group = std::env::var("ATLAS_TEST_NACOS_MUTATION_GROUP")
+                .unwrap_or_else(|_| "ATLAS_REGISTRY_TEST".to_owned());
+            let address = ResourceAddress::NacosConfig {
+                group,
+                data_id: format!("atlas-registry-live-test-{}", unique_suffix()),
+            };
+            assert_create_update_delete(&service, &session.id, address).await;
+        }
     });
+}
+
+async fn assert_create_update_delete(
+    service: &RegistryService,
+    connection_id: &str,
+    address: ResourceAddress,
+) {
+    let created = service
+        .mutate(
+            connection_id,
+            ResourceMutation::Create {
+                address: address.clone(),
+                value: text_value("atlas-live-create"),
+                content_type: Some("text".to_owned()),
+            },
+        )
+        .await
+        .expect("test resource should be created");
+    let created_version = created
+        .current
+        .and_then(|snapshot| snapshot.version)
+        .expect("create should return a version");
+
+    let stale_version = match &address {
+        ResourceAddress::NacosConfig { .. } => "stale-md5".to_owned(),
+        _ => (created_version
+            .parse::<i64>()
+            .expect("numeric protocol version")
+            + 1)
+        .to_string(),
+    };
+    let conflict = service
+        .mutate(
+            connection_id,
+            ResourceMutation::Update {
+                address: address.clone(),
+                value: text_value("must-not-overwrite"),
+                content_type: Some("text".to_owned()),
+                expected_version: stale_version,
+            },
+        )
+        .await
+        .expect_err("stale update must be rejected");
+    assert_eq!(
+        conflict.code,
+        atlas_registry_lib::registry::RegistryErrorCode::Conflict
+    );
+
+    let updated = service
+        .mutate(
+            connection_id,
+            ResourceMutation::Update {
+                address: address.clone(),
+                value: text_value("atlas-live-update"),
+                content_type: Some("text".to_owned()),
+                expected_version: created_version,
+            },
+        )
+        .await
+        .expect("test resource should be conditionally updated");
+    let updated_version = updated
+        .current
+        .and_then(|snapshot| snapshot.version)
+        .expect("update should return a version");
+    let document = service
+        .read(connection_id, address.clone())
+        .await
+        .expect("updated resource should be readable");
+    assert_eq!(document.value.content, "atlas-live-update");
+
+    service
+        .mutate(
+            connection_id,
+            ResourceMutation::Delete {
+                address: address.clone(),
+                expected_version: updated_version,
+            },
+        )
+        .await
+        .expect("test resource should be conditionally deleted");
+    let missing = service
+        .read(connection_id, address)
+        .await
+        .expect_err("deleted resource should not be readable");
+    assert_eq!(
+        missing.code,
+        atlas_registry_lib::registry::RegistryErrorCode::NotFound
+    );
 }

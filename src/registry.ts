@@ -6,7 +6,7 @@ export type NacosApiVersion = "v2" | "v3";
 export type AdapterDescriptor = {
   id: AdapterId;
   status: "available";
-  capabilities: Array<"probe" | "browse" | "read">;
+  capabilities: Array<"probe" | "browse" | "read" | "create" | "update" | "delete">;
 };
 
 export type ConnectionProfile = {
@@ -69,6 +69,46 @@ export type RegistryError = {
   retryable: boolean;
 };
 
+export type MutationValue = {
+  content: string;
+  encoding: "utf8" | "base64";
+};
+
+export type ResourceMutation =
+  | {
+      operation: "create";
+      address: ResourceAddress;
+      value: MutationValue;
+      contentType?: string;
+    }
+  | {
+      operation: "update";
+      address: ResourceAddress;
+      value: MutationValue;
+      contentType?: string;
+      expectedVersion: string;
+    }
+  | {
+      operation: "delete";
+      address: ResourceAddress;
+      expectedVersion: string;
+    };
+
+export type ResourceSnapshot = {
+  version?: string;
+  sha256: string;
+  sizeBytes: number;
+  encoding: "utf8" | "base64";
+};
+
+export type MutationResult = {
+  operation: "create" | "update" | "delete";
+  address: ResourceAddress;
+  previous?: ResourceSnapshot;
+  current?: ResourceSnapshot;
+  consistency: "atomic" | "checkedBeforeMutation";
+};
+
 export const ROOT_ADDRESS: ResourceAddress = { type: "root" };
 
 export function registryCapabilities() {
@@ -120,6 +160,16 @@ export function readResource(
   });
 }
 
+export function mutateResource(
+  connectionId: string,
+  mutation: ResourceMutation,
+  operationId: string,
+) {
+  return invoke<MutationResult>("mutate_resource", {
+    request: { connectionId, mutation, operationId },
+  });
+}
+
 export function cancelOperation(operationId: string) {
   return invoke<boolean>("cancel_operation", { operationId });
 }
@@ -134,6 +184,12 @@ export function errorMessage(reason: unknown): string {
 
 export function isCancelled(reason: unknown): boolean {
   return Boolean(reason && typeof reason === "object" && "code" in reason && reason.code === "cancelled");
+}
+
+export function isOutcomeUnknown(reason: unknown): boolean {
+  return Boolean(
+    reason && typeof reason === "object" && "code" in reason && reason.code === "outcomeUnknown",
+  );
 }
 
 export function newConnectionId(): string {

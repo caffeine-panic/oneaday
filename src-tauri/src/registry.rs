@@ -1,9 +1,18 @@
 mod adapters;
+mod mutations;
 
-use std::{collections::BTreeMap, future::Future, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +38,9 @@ pub enum Capability {
     Probe,
     Browse,
     Read,
+    Create,
+    Update,
+    Delete,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -146,11 +158,172 @@ impl OperationId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueEncoding {
     Utf8,
     Base64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationValue {
+    pub content: String,
+    pub encoding: ValueEncoding,
+}
+
+impl MutationValue {
+    fn decoded(&self) -> Result<Vec<u8>, RegistryError> {
+        let bytes = match self.encoding {
+            ValueEncoding::Utf8 => self.content.as_bytes().to_vec(),
+            ValueEncoding::Base64 => STANDARD
+                .decode(&self.content)
+                .map_err(|_| RegistryError::validation("mutation value is not valid base64"))?,
+        };
+        if bytes.len() > EncodedValue::MAX_INLINE_BYTES {
+            return Err(RegistryError::new(
+                RegistryErrorCode::ValueTooLarge,
+                format!(
+                    "mutation is {} bytes; the current safety limit is {} bytes",
+                    bytes.len(),
+                    EncodedValue::MAX_INLINE_BYTES
+                ),
+                false,
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "operation", rename_all = "camelCase")]
+pub enum ResourceMutation {
+    Create {
+        address: ResourceAddress,
+        value: MutationValue,
+        content_type: Option<String>,
+    },
+    Update {
+        address: ResourceAddress,
+        value: MutationValue,
+        content_type: Option<String>,
+        expected_version: String,
+    },
+    Delete {
+        address: ResourceAddress,
+        expected_version: String,
+    },
+}
+
+impl ResourceMutation {
+    pub fn validate(&self) -> Result<(), RegistryError> {
+        validate_mutation_address(self.address())?;
+        match self {
+            Self::Create { value, .. } => {
+                value.decoded()?;
+            }
+            Self::Update {
+                value,
+                expected_version,
+                ..
+            } => {
+                validate_expected_version(expected_version)?;
+                value.decoded()?;
+            }
+            Self::Delete {
+                expected_version, ..
+            } => validate_expected_version(expected_version)?,
+        }
+        Ok(())
+    }
+
+    pub fn decoded_value(&self) -> Result<Vec<u8>, RegistryError> {
+        match self {
+            Self::Create { value, .. } | Self::Update { value, .. } => value.decoded(),
+            Self::Delete { .. } => Err(RegistryError::validation(
+                "delete mutation does not contain a value",
+            )),
+        }
+    }
+
+    pub fn address(&self) -> &ResourceAddress {
+        match self {
+            Self::Create { address, .. }
+            | Self::Update { address, .. }
+            | Self::Delete { address, .. } => address,
+        }
+    }
+
+    pub fn operation(&self) -> MutationOperation {
+        match self {
+            Self::Create { .. } => MutationOperation::Create,
+            Self::Update { .. } => MutationOperation::Update,
+            Self::Delete { .. } => MutationOperation::Delete,
+        }
+    }
+
+    pub fn expected_version(&self) -> Option<&str> {
+        match self {
+            Self::Create { .. } => None,
+            Self::Update {
+                expected_version, ..
+            }
+            | Self::Delete {
+                expected_version, ..
+            } => Some(expected_version),
+        }
+    }
+}
+
+fn validate_expected_version(expected_version: &str) -> Result<(), RegistryError> {
+    if expected_version.trim().is_empty() {
+        Err(RegistryError::validation(
+            "conditional mutation requires an expected version",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_mutation_address(address: &ResourceAddress) -> Result<(), RegistryError> {
+    match address {
+        ResourceAddress::Root | ResourceAddress::EtcdPrefix { .. } => Err(
+            RegistryError::validation("only leaf resources can be mutated"),
+        ),
+        ResourceAddress::Etcd { key_base64 } => {
+            let key = STANDARD
+                .decode(key_base64)
+                .map_err(|_| RegistryError::validation("etcd key is not valid base64"))?;
+            if key.is_empty() {
+                return Err(RegistryError::validation("etcd key cannot be empty"));
+            }
+            Ok(())
+        }
+        ResourceAddress::Zookeeper { path } => {
+            if !path.starts_with('/')
+                || path == "/"
+                || path.ends_with('/')
+                || path.contains('\0')
+                || path
+                    .split('/')
+                    .skip(1)
+                    .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+            {
+                return Err(RegistryError::validation(
+                    "ZooKeeper mutation requires a canonical absolute non-root path",
+                ));
+            }
+            Ok(())
+        }
+        ResourceAddress::NacosConfig { group, data_id } => {
+            if group.trim().is_empty() || data_id.trim().is_empty() {
+                return Err(RegistryError::validation(
+                    "Nacos mutation requires both group and dataId",
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -193,6 +366,107 @@ impl EncodedValue {
         }
         Ok(Self::from_bytes(bytes))
     }
+
+    fn decoded(&self) -> Result<Vec<u8>, RegistryError> {
+        match self.encoding {
+            ValueEncoding::Utf8 => Ok(self.content.as_bytes().to_vec()),
+            ValueEncoding::Base64 => STANDARD
+                .decode(&self.content)
+                .map_err(|_| RegistryError::invalid_response("resource value is not valid base64")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceSnapshot {
+    pub version: Option<String>,
+    pub sha256: String,
+    pub size_bytes: usize,
+    pub encoding: ValueEncoding,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MutationOperation {
+    Create,
+    Update,
+    Delete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MutationConsistency {
+    Atomic,
+    CheckedBeforeMutation,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct MutationPhase(Arc<AtomicU8>);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MutationPhaseState {
+    PreDispatch = 0,
+    Dispatched = 1,
+    Finalizing = 2,
+}
+
+impl MutationPhase {
+    pub(crate) fn mark_dispatched(&self) {
+        self.0
+            .store(MutationPhaseState::Dispatched as u8, Ordering::SeqCst);
+    }
+
+    pub(crate) fn mark_finalizing(&self) {
+        self.0
+            .store(MutationPhaseState::Finalizing as u8, Ordering::SeqCst);
+    }
+
+    fn state(&self) -> MutationPhaseState {
+        match self.0.load(Ordering::SeqCst) {
+            1 => MutationPhaseState::Dispatched,
+            2 => MutationPhaseState::Finalizing,
+            _ => MutationPhaseState::PreDispatch,
+        }
+    }
+
+    pub(crate) fn timeout_error(&self) -> RegistryError {
+        match self.state() {
+            MutationPhaseState::PreDispatch => {
+                RegistryError::timeout("resource mutation preflight")
+            }
+            MutationPhaseState::Dispatched | MutationPhaseState::Finalizing => {
+                RegistryError::mutation_outcome_unknown(
+                    "resource mutation timed out after write dispatch; refresh the resource to determine its remote state",
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationResult {
+    pub operation: MutationOperation,
+    pub address: ResourceAddress,
+    pub previous: Option<ResourceSnapshot>,
+    pub current: Option<ResourceSnapshot>,
+    pub consistency: MutationConsistency,
+}
+
+impl ResourceSnapshot {
+    pub fn from_bytes(bytes: &[u8], version: Option<String>) -> Self {
+        Self {
+            version,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+            size_bytes: bytes.len(),
+            encoding: if std::str::from_utf8(bytes).is_ok() {
+                ValueEncoding::Utf8
+            } else {
+                ValueEncoding::Base64
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -206,6 +480,15 @@ pub struct ResourceDocument {
     pub metadata: BTreeMap<String, String>,
 }
 
+impl ResourceDocument {
+    pub fn snapshot(&self) -> Result<ResourceSnapshot, RegistryError> {
+        Ok(ResourceSnapshot::from_bytes(
+            &self.value.decoded()?,
+            self.version.clone(),
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RegistryErrorCode {
@@ -217,6 +500,11 @@ pub enum RegistryErrorCode {
     InvalidResponse,
     Timeout,
     ValueTooLarge,
+    Conflict,
+    OutcomeUnknown,
+    PermissionDenied,
+    ResourceExhausted,
+    AuditIncomplete,
     Storage,
     Cancelled,
 }
@@ -262,6 +550,22 @@ impl RegistryError {
         Self::new(RegistryErrorCode::Unsupported, message, false)
     }
 
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::Conflict, message, false)
+    }
+
+    pub(crate) fn permission_denied(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::PermissionDenied, message, false)
+    }
+
+    pub(crate) fn audit_incomplete(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::AuditIncomplete, message, false)
+    }
+
+    pub(crate) fn resource_exhausted(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::ResourceExhausted, message, true)
+    }
+
     pub(crate) fn timeout(operation: &str) -> Self {
         Self::new(
             RegistryErrorCode::Timeout,
@@ -281,6 +585,16 @@ impl RegistryError {
             true,
         )
     }
+
+    fn outcome_unknown() -> Self {
+        Self::mutation_outcome_unknown(
+            "mutation was cancelled after dispatch; refresh the resource to determine its remote state",
+        )
+    }
+
+    pub(crate) fn mutation_outcome_unknown(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::OutcomeUnknown, message, false)
+    }
 }
 
 #[derive(Default)]
@@ -293,7 +607,14 @@ impl RegistryCatalog {
             .map(|id| AdapterDescriptor {
                 id,
                 status: AdapterStatus::Available,
-                capabilities: vec![Capability::Probe, Capability::Browse, Capability::Read],
+                capabilities: vec![
+                    Capability::Probe,
+                    Capability::Browse,
+                    Capability::Read,
+                    Capability::Create,
+                    Capability::Update,
+                    Capability::Delete,
+                ],
             })
             .collect()
     }
@@ -412,6 +733,74 @@ impl RegistryService {
         .await
     }
 
+    pub async fn mutate(
+        &self,
+        connection_id: &str,
+        mutation: ResourceMutation,
+    ) -> Result<MutationResult, RegistryError> {
+        self.mutate_with_phase(connection_id, mutation, MutationPhase::default())
+            .await
+    }
+
+    pub(crate) async fn mutate_with_phase(
+        &self,
+        connection_id: &str,
+        mutation: ResourceMutation,
+        phase: MutationPhase,
+    ) -> Result<MutationResult, RegistryError> {
+        mutation.validate()?;
+        let session = self.session(connection_id).await?;
+        session.mutate(mutation, phase).await
+    }
+
+    pub async fn mutate_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        mutation: ResourceMutation,
+    ) -> Result<MutationResult, RegistryError> {
+        let service = self.clone();
+        let phase = MutationPhase::default();
+        let running_phase = phase.clone();
+        self.run_mutation_workflow(operation_id, phase, async move {
+            service
+                .mutate_with_phase(&connection_id, mutation, running_phase)
+                .await
+        })
+        .await
+    }
+
+    pub(crate) async fn run_mutation_workflow<T>(
+        &self,
+        operation_id: OperationId,
+        phase: MutationPhase,
+        operation: impl Future<Output = Result<T, RegistryError>>,
+    ) -> Result<T, RegistryError> {
+        let token = CancellationToken::new();
+        {
+            let mut operations = self.operations.write().await;
+            if operations.contains_key(&operation_id) {
+                return Err(RegistryError::validation(format!(
+                    "operation id '{}' is already active",
+                    operation_id.0
+                )));
+            }
+            operations.insert(operation_id.clone(), token.clone());
+        }
+        tokio::pin!(operation);
+        let result = tokio::select! {
+            biased;
+            result = &mut operation => result,
+            () = token.cancelled() => match phase.state() {
+                MutationPhaseState::PreDispatch => Err(RegistryError::cancelled()),
+                MutationPhaseState::Dispatched => Err(RegistryError::outcome_unknown()),
+                MutationPhaseState::Finalizing => operation.await,
+            },
+        };
+        self.operations.write().await.remove(&operation_id);
+        result
+    }
+
     pub async fn cancel(&self, operation_id: &OperationId) -> bool {
         if let Some(token) = self.operations.read().await.get(operation_id).cloned() {
             token.cancel();
@@ -443,6 +832,26 @@ impl RegistryService {
         operation_id: OperationId,
         operation: impl Future<Output = Result<T, RegistryError>>,
     ) -> Result<T, RegistryError> {
+        self.run_operation_with_cancel_error(operation_id, operation, RegistryError::cancelled())
+            .await
+    }
+
+    async fn run_operation_with_cancel_error<T>(
+        &self,
+        operation_id: OperationId,
+        operation: impl Future<Output = Result<T, RegistryError>>,
+        cancel_error: RegistryError,
+    ) -> Result<T, RegistryError> {
+        self.run_operation_with_cancel_error_factory(operation_id, operation, move || cancel_error)
+            .await
+    }
+
+    async fn run_operation_with_cancel_error_factory<T>(
+        &self,
+        operation_id: OperationId,
+        operation: impl Future<Output = Result<T, RegistryError>>,
+        cancel_error: impl FnOnce() -> RegistryError,
+    ) -> Result<T, RegistryError> {
         let token = CancellationToken::new();
         {
             let mut operations = self.operations.write().await;
@@ -456,7 +865,7 @@ impl RegistryService {
         }
         let result = tokio::select! {
             result = operation => result,
-            () = token.cancelled() => Err(RegistryError::cancelled()),
+            () = token.cancelled() => Err(cancel_error()),
         };
         self.operations.write().await.remove(&operation_id);
         result
@@ -465,7 +874,7 @@ impl RegistryService {
 
 #[cfg(test)]
 mod tests {
-    use super::{OperationId, RegistryError, RegistryErrorCode, RegistryService};
+    use super::{MutationPhase, OperationId, RegistryError, RegistryErrorCode, RegistryService};
 
     #[tokio::test]
     async fn cancellation_interrupts_an_operation_and_removes_its_registration() {
@@ -497,5 +906,107 @@ mod tests {
             .expect_err("cancelled operation should return an error");
         assert_eq!(error.code, RegistryErrorCode::Cancelled);
         assert!(!service.cancel(&operation_id).await);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_mutation_reports_an_unknown_remote_outcome() {
+        let service = RegistryService::default();
+        let operation_id = OperationId::new("pending-mutation".to_owned()).unwrap();
+        let running_service = service.clone();
+        let running_id = operation_id.clone();
+        let task = tokio::spawn(async move {
+            running_service
+                .run_operation_with_cancel_error(
+                    running_id,
+                    std::future::pending::<Result<(), RegistryError>>(),
+                    RegistryError::outcome_unknown(),
+                )
+                .await
+        });
+
+        for _ in 0..10 {
+            if service.operations.read().await.contains_key(&operation_id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(service.cancel(&operation_id).await);
+        let error = task
+            .await
+            .expect("operation task should finish")
+            .expect_err("cancelled mutation cannot claim a known outcome");
+        assert_eq!(error.code, RegistryErrorCode::OutcomeUnknown);
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn mutation_timeout_reports_an_unknown_remote_outcome() {
+        let error = RegistryError::mutation_outcome_unknown("timed out after 8 seconds");
+
+        assert_eq!(error.code, RegistryErrorCode::OutcomeUnknown);
+        assert!(error.message.contains("timed out"));
+        assert!(!error.retryable);
+    }
+
+    #[tokio::test]
+    async fn mutation_workflow_cancellation_uses_the_dispatch_phase() {
+        let service = RegistryService::default();
+        let phase = MutationPhase::default();
+        let running_service = service.clone();
+        let running_phase = phase.clone();
+        let operation_id = OperationId::new("workflow-phase".to_owned()).unwrap();
+        let running_id = operation_id.clone();
+        let task = tokio::spawn(async move {
+            running_service
+                .run_mutation_workflow(
+                    running_id,
+                    running_phase,
+                    std::future::pending::<Result<(), RegistryError>>(),
+                )
+                .await
+        });
+
+        for _ in 0..10 {
+            if service.operations.read().await.contains_key(&operation_id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        phase.mark_dispatched();
+        assert!(service.cancel(&operation_id).await);
+        let error = task.await.unwrap().unwrap_err();
+
+        assert_eq!(error.code, RegistryErrorCode::OutcomeUnknown);
+    }
+
+    #[tokio::test]
+    async fn cancellation_does_not_interrupt_final_audit_recording() {
+        let service = RegistryService::default();
+        let phase = MutationPhase::default();
+        let running_service = service.clone();
+        let running_phase = phase.clone();
+        let operation_id = OperationId::new("workflow-finalizing".to_owned()).unwrap();
+        let running_id = operation_id.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let workflow_phase = running_phase.clone();
+            running_service
+                .run_mutation_workflow(running_id, running_phase, async move {
+                    workflow_phase.mark_finalizing();
+                    let _ = entered_tx.send(());
+                    finish_rx.await.unwrap();
+                    Ok::<_, RegistryError>(())
+                })
+                .await
+        });
+
+        entered_rx.await.unwrap();
+        assert!(service.cancel(&operation_id).await);
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        finish_tx.send(()).unwrap();
+
+        assert!(task.await.unwrap().is_ok());
     }
 }

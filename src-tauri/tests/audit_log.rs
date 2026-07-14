@@ -1,0 +1,77 @@
+use atlas_registry_lib::{
+    audit::AuditLog,
+    registry::{
+        MutationConsistency, MutationOperation, MutationResult, MutationValue, ResourceAddress,
+        ResourceMutation, ResourceSnapshot, ValueEncoding,
+    },
+};
+
+#[test]
+fn audit_log_persists_started_and_applied_events_without_resource_values() {
+    tauri::async_runtime::block_on(async {
+        let directory = std::env::temp_dir().join(format!(
+            "atlas-audit-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        let address = ResourceAddress::Zookeeper {
+            path: "/apps/payment".to_owned(),
+        };
+        let mutation = ResourceMutation::Update {
+            address: address.clone(),
+            value: MutationValue {
+                content: "TOP_SECRET_VALUE".to_owned(),
+                encoding: ValueEncoding::Utf8,
+            },
+            content_type: Some("text".to_owned()),
+            expected_version: "3".to_owned(),
+        };
+        let previous = ResourceSnapshot::from_bytes(b"old secret", Some("3".to_owned()));
+        let result = MutationResult {
+            operation: MutationOperation::Update,
+            address,
+            previous: Some(previous.clone()),
+            current: Some(ResourceSnapshot::from_bytes(
+                b"TOP_SECRET_VALUE",
+                Some("4".to_owned()),
+            )),
+            consistency: MutationConsistency::Atomic,
+        };
+        let log = AuditLog::default();
+
+        log.record_started_in(
+            &directory,
+            "connection-1",
+            "operation-1",
+            &mutation,
+            Some(&previous),
+        )
+        .await
+        .expect("started event should be written");
+        log.record_applied_in(&directory, "connection-1", "operation-1", &result)
+            .await
+            .expect("applied event should be written");
+        log.record_outcome_unknown_in(&directory, "connection-1", "operation-2")
+            .await
+            .expect("unknown outcome event should be written");
+
+        let content = tokio::fs::read_to_string(directory.join("mutation-audit.jsonl"))
+            .await
+            .expect("audit file should exist");
+        assert_eq!(content.lines().count(), 3);
+        assert!(content.contains("mutationStarted"));
+        assert!(content.contains("mutationApplied"));
+        assert!(content.contains("mutationOutcomeUnknown"));
+        assert!(content.lines().next().unwrap().contains(&previous.sha256));
+        assert!(content.contains(&result.current.expect("current snapshot").sha256));
+        assert!(!content.contains("TOP_SECRET_VALUE"));
+        assert!(!content.contains("old secret"));
+
+        tokio::fs::remove_dir_all(directory)
+            .await
+            .expect("test directory should be removable");
+    });
+}

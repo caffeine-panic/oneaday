@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  MutationConfirmationDialog,
+  NewResourceDialog,
+  type NewResourceDraft,
+} from "./MutationDialogs";
+import {
   ROOT_ADDRESS,
   cancelOperation,
   closeConnection,
   errorMessage,
   isCancelled,
+  isOutcomeUnknown,
   listResources,
   loadConnectionProfiles,
   newConnectionId,
+  mutateResource,
   openConnection,
   probeConnection,
   readResource,
@@ -20,6 +27,7 @@ import {
   type ResourceAddress,
   type ResourceDocument,
   type ResourceNode,
+  type ResourceMutation,
 } from "./registry";
 
 type ResourceRow = {
@@ -52,6 +60,14 @@ const endpointPlaceholders: Record<AdapterId, string> = {
   zookeeper: "127.0.0.1:2181 或 zk-1:2181,zk-2:2181/app",
   nacos: "127.0.0.1:8848",
 };
+
+const emptyResourceDraft = (adapter: AdapterId): NewResourceDraft => ({
+  keyOrPath: adapter === "zookeeper" ? "/" : "",
+  group: "DEFAULT_GROUP",
+  dataId: "",
+  content: "",
+  contentType: "text",
+});
 
 function pageRows(
   items: ResourceNode[],
@@ -99,6 +115,13 @@ function addressLabel(address: ResourceAddress) {
   }
 }
 
+function utf8Base64(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 export function App() {
   const [capabilities, setCapabilities] = useState<AdapterDescriptor[]>();
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
@@ -106,6 +129,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string>();
   const [rows, setRows] = useState<TreeRow[]>([]);
   const [document, setDocument] = useState<ResourceDocument>();
+  const [draftValue, setDraftValue] = useState("");
   const [selectedAddress, setSelectedAddress] = useState<ResourceAddress>();
   const [filter, setFilter] = useState("");
   const [busy, setBusy] = useState(false);
@@ -114,6 +138,10 @@ export function App() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [form, setForm] = useState<ConnectionProfile>(emptyForm);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [resourceDraft, setResourceDraft] = useState<NewResourceDraft>(() => emptyResourceDraft("etcd"));
+  const [pendingMutation, setPendingMutation] = useState<ResourceMutation>();
+  const [confirmationText, setConfirmationText] = useState("");
 
   const selectedProfile = profiles.find((profile) => profile.id === selectedId);
   const selectedSession = selectedId ? sessions[selectedId] : undefined;
@@ -158,6 +186,25 @@ export function App() {
     }
   };
 
+  const runRead = async (connectionId: string, address: ResourceAddress) => {
+    const operationId = startOperation();
+    try {
+      return await readResource(connectionId, address, operationId);
+    } finally {
+      finishOperation(operationId);
+    }
+  };
+
+  const showDocument = (nextDocument: ResourceDocument | undefined) => {
+    setDocument(nextDocument);
+    setDraftValue(nextDocument?.value.content ?? "");
+  };
+
+  const reloadRoot = async (connectionId: string) => {
+    const page = await runList(connectionId, ROOT_ADDRESS);
+    setRows(pageRows(page.items, 0, page.parent, page.nextCursor));
+  };
+
   const cancelActiveOperation = async () => {
     if (!activeOperation) return;
     try {
@@ -170,7 +217,7 @@ export function App() {
   const connectAndLoad = async (profile: ConnectionProfile) => {
     setBusy(true);
     setMessage(undefined);
-    setDocument(undefined);
+    showDocument(undefined);
     setRows([]);
     try {
       const operationId = startOperation();
@@ -180,10 +227,9 @@ export function App() {
       } finally {
         finishOperation(operationId);
       }
-      const page = await runList(session.id, ROOT_ADDRESS);
       setSessions((current) => ({ ...current, [session.id]: session }));
       setSelectedId(session.id);
-      setRows(pageRows(page.items, 0, page.parent, page.nextCursor));
+      await reloadRoot(session.id);
       setMessage(`已连接 ${session.endpoint}`);
       return true;
     } catch (reason) {
@@ -236,7 +282,7 @@ export function App() {
   const selectProfile = async (profile: ConnectionProfile) => {
     setSelectedId(profile.id);
     setRows([]);
-    setDocument(undefined);
+    showDocument(undefined);
     setSelectedAddress(undefined);
     setMessage(sessions[profile.id] ? "连接会话已打开，点击刷新加载资源" : undefined);
   };
@@ -246,8 +292,7 @@ export function App() {
     setBusy(true);
     setMessage(undefined);
     try {
-      const page = await runList(selectedSession.id, ROOT_ADDRESS);
-      setRows(pageRows(page.items, 0, page.parent, page.nextCursor));
+      await reloadRoot(selectedSession.id);
     } catch (reason) {
       setMessage(errorMessage(reason));
     } finally {
@@ -262,15 +307,13 @@ export function App() {
 
     if (row.node.readable) {
       setBusy(true);
-      const operationId = startOperation();
       try {
-        setDocument(await readResource(selectedSession.id, row.node.address, operationId));
+        showDocument(await runRead(selectedSession.id, row.node.address));
       } catch (reason) {
-        setDocument(undefined);
+        showDocument(undefined);
         setMessage(errorMessage(reason));
         if (isCancelled(reason)) return;
       } finally {
-        finishOperation(operationId);
         setBusy(false);
       }
     }
@@ -336,6 +379,144 @@ export function App() {
     }
   };
 
+  const openCreateResource = () => {
+    if (!selectedProfile || !selectedSession || busy) return;
+    setResourceDraft(emptyResourceDraft(selectedProfile.adapter));
+    setCreateDialogOpen(true);
+  };
+
+  const prepareCreate = () => {
+    if (!selectedProfile) return;
+    const contentType = resourceDraft.contentType.trim() || undefined;
+    let address: ResourceAddress;
+    if (selectedProfile.adapter === "etcd") {
+      if (!resourceDraft.keyOrPath.trim()) {
+        setMessage("etcd key 不能为空");
+        return;
+      }
+      address = { type: "etcd", keyBase64: utf8Base64(resourceDraft.keyOrPath) };
+    } else if (selectedProfile.adapter === "zookeeper") {
+      const path = resourceDraft.keyOrPath.trim();
+      if (!path.startsWith("/") || path === "/") {
+        setMessage("ZooKeeper 路径必须以 / 开头且不能是根节点");
+        return;
+      }
+      address = { type: "zookeeper", path };
+    } else {
+      const group = resourceDraft.group.trim();
+      const dataId = resourceDraft.dataId.trim();
+      if (!group || !dataId || !resourceDraft.content) {
+        setMessage("Nacos 创建需要 group、dataId 和非空内容");
+        return;
+      }
+      address = { type: "nacosConfig", group, dataId };
+    }
+    setPendingMutation({
+      operation: "create",
+      address,
+      value: { content: resourceDraft.content, encoding: "utf8" },
+      contentType,
+    });
+    setConfirmationText("");
+    setCreateDialogOpen(false);
+  };
+
+  const prepareUpdate = () => {
+    if (!document?.version) {
+      setMessage("当前资源没有可用于条件更新的版本，请先刷新");
+      return;
+    }
+    setPendingMutation({
+      operation: "update",
+      address: document.address,
+      value: { content: draftValue, encoding: document.value.encoding },
+      contentType: document.contentType,
+      expectedVersion: document.version,
+    });
+    setConfirmationText("");
+  };
+
+  const prepareDelete = () => {
+    if (!document?.version) {
+      setMessage("当前资源没有可用于条件删除的版本，请先刷新");
+      return;
+    }
+    setPendingMutation({
+      operation: "delete",
+      address: document.address,
+      expectedVersion: document.version,
+    });
+    setConfirmationText("");
+  };
+
+  const reconcileUnknownMutation = async (connectionId: string, address: ResourceAddress) => {
+    try {
+      await reloadRoot(connectionId);
+      const remoteDocument = await runRead(connectionId, address);
+      showDocument(remoteDocument);
+      setSelectedAddress(address);
+      return true;
+    } catch {
+      showDocument(undefined);
+      setSelectedAddress(undefined);
+      return false;
+    }
+  };
+
+  const executeMutation = async () => {
+    if (!selectedSession || !pendingMutation || busy) return;
+    const mutation = pendingMutation;
+    setBusy(true);
+    setMessage(undefined);
+    const operationId = startOperation();
+    let result: Awaited<ReturnType<typeof mutateResource>>;
+    try {
+      result = await mutateResource(selectedSession.id, mutation, operationId);
+    } catch (reason) {
+      finishOperation(operationId);
+      const message = errorMessage(reason);
+      if (isOutcomeUnknown(reason) || message.includes("mutation succeeded")) {
+        const reconciled = await reconcileUnknownMutation(selectedSession.id, mutation.address);
+        setPendingMutation(undefined);
+        setMessage(reconciled
+          ? `${message}；已重新读取远端状态`
+          : `${message}；自动回读失败，远端结果仍未知，请先恢复连接并刷新，勿直接重试`);
+      } else {
+        if (reason && typeof reason === "object" && "code" in reason && reason.code === "conflict") {
+          const reconciled = await reconcileUnknownMutation(selectedSession.id, mutation.address);
+          setPendingMutation(undefined);
+          setMessage(reconciled ? message : `${message}；自动刷新失败，请恢复连接后手动刷新`);
+        } else {
+          setMessage(message);
+        }
+      }
+      setBusy(false);
+      return;
+    }
+    finishOperation(operationId);
+    setPendingMutation(undefined);
+    try {
+      await reloadRoot(selectedSession.id);
+      if (result.operation === "delete") {
+        showDocument(undefined);
+        setSelectedAddress(undefined);
+      } else {
+        const refreshed = await runRead(selectedSession.id, result.address);
+        showDocument(refreshed);
+        setSelectedAddress(result.address);
+      }
+      setMessage(
+        result.consistency === "atomic"
+          ? "变更成功，条件版本已校验，脱敏审计已记录"
+          : "变更成功；Nacos 操作为校验后变更，脱敏审计已记录",
+      );
+    } catch (reason) {
+      setMessage(`变更已成功，但刷新失败：${errorMessage(reason)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const disconnect = async () => {
     if (!selectedSession) return;
     try {
@@ -349,7 +530,9 @@ export function App() {
       return next;
     });
     setRows([]);
-    setDocument(undefined);
+    showDocument(undefined);
+    setPendingMutation(undefined);
+    setCreateDialogOpen(false);
     setMessage("连接已断开");
   };
 
@@ -362,7 +545,7 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand"><span className="logo">A</span>Atlas Registry</div>
-        <span className="release-tag">READ-ONLY ALPHA</span>
+        <span className="release-tag">SAFE-WRITE ALPHA</span>
         <div className="top-spacer" />
         <div className={`runtime ${capabilities ? "" : "pending"}`}>
           <span className="status-dot" />
@@ -419,6 +602,7 @@ export function App() {
         <section className="tree">
           <div className="tree-header">
             <b>{selectedProfile?.name ?? "资源"}</b>
+            <button className="icon-button create-resource" disabled={!selectedSession || busy} onClick={openCreateResource} title="新建资源">＋</button>
             <button className="icon-button" disabled={!selectedSession || busy} onClick={() => void refreshRoot()} title="刷新">↻</button>
             <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选当前已加载资源…" />
           </div>
@@ -467,7 +651,10 @@ export function App() {
               <div className="breadcrumb">{selectedProfile?.name} / <b>{addressLabel(document.address)}</b></div>
               <div className="detail-title">
                 <div><span className="eyebrow">RESOURCE</span><h1>{document.name}</h1></div>
-                <div className="actions"><button className="button" disabled>只读阶段</button></div>
+                <div className="actions">
+                  <button className="button danger" disabled={busy || !document.version} onClick={prepareDelete}>删除</button>
+                  <button className="button primary" disabled={busy || !document.version || draftValue === document.value.content} onClick={prepareUpdate}>保存变更</button>
+                </div>
               </div>
               <div className="stats">
                 <div><span>版本</span><strong>{document.version || "—"}</strong></div>
@@ -477,8 +664,8 @@ export function App() {
               {document.value.encoding === "base64" && (
                 <div className="binary-warning">该值不是有效 UTF-8，已使用 Base64 展示，内容没有被替换或损坏。</div>
               )}
-              <div className="editor-header"><span>{document.contentType?.toUpperCase() || "TEXT"}</span><span>{document.value.encoding.toUpperCase()}</span></div>
-              <textarea value={document.value.content} readOnly spellCheck={false} />
+              <div className="editor-header"><span>{document.contentType?.toUpperCase() || "TEXT"}</span><span>{draftValue === document.value.content ? document.value.encoding.toUpperCase() : `${document.value.encoding.toUpperCase()} · 已修改`}</span></div>
+              <textarea value={draftValue} disabled={busy} onChange={(event) => setDraftValue(event.target.value)} spellCheck={false} />
               <div className="metadata">
                 {Object.entries(document.metadata).map(([name, value]) => (
                   <div className="metadata-row" key={name}><span>{name}</span><b>{value || "—"}</b></div>
@@ -521,6 +708,29 @@ export function App() {
             </div>
           </section>
         </div>
+      )}
+
+      {createDialogOpen && selectedProfile && (
+        <NewResourceDialog
+          adapter={selectedProfile.adapter}
+          draft={resourceDraft}
+          onChange={setResourceDraft}
+          onCancel={() => setCreateDialogOpen(false)}
+          onContinue={prepareCreate}
+        />
+      )}
+
+      {pendingMutation && selectedProfile && (
+        <MutationConfirmationDialog
+          mutation={pendingMutation}
+          profile={selectedProfile}
+          confirmationText={confirmationText}
+          busy={busy}
+          onConfirmationTextChange={setConfirmationText}
+          onCancel={() => setPendingMutation(undefined)}
+          onConfirm={() => void executeMutation()}
+          onCancelOperation={() => void cancelActiveOperation()}
+        />
       )}
     </div>
   );
