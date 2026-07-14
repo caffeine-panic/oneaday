@@ -13,7 +13,7 @@ Atlas Registry 需要以桌面应用形式统一访问 etcd、ZooKeeper 和 Naco
 
 - etcd：`etcd-client` 0.19，启用系统 TLS roots。
 - ZooKeeper：`zookeeper-client` 0.11.1，启用 Tokio 与 TLS。
-- Nacos：`nacos-sdk` 0.8；当前通过 Config 客户端实现连通性探测，Naming 与管理面能力在后续垂直切片接入。
+- Nacos：`nacos-sdk` 0.8；Config 客户端负责连接与单配置读取，2.x legacy 管理接口和 3.x Admin API 负责配置分页列表；Naming 能力在后续垂直切片接入。
 - `RegistryCatalog` 是前端与协议实现之间的公共边界，返回 adapter descriptor，并提供连接探测。
 - 公共能力可以统一；lease、transaction、ACL、ephemeral、namespace、service 等原生能力不能抹平。
 
@@ -27,4 +27,4 @@ Atlas Registry 需要以桌面应用形式统一访问 etcd、ZooKeeper 和 Naco
 
 ## 当前进展
 
-技术 Spike 已结束。正式开发的第一条产品链路已经完成长生命周期 session、按需浏览与资源读取，catalog 声明 `probe`、`browse` 和 `read`。条件写入、删除、监听、凭据存储与认证属于后续垂直切片。
+技术 Spike 已结束。正式开发的第一条产品链路已实现长生命周期 session、可取消的按需浏览、资源读取和 1 MiB WebView 大值边界，catalog 声明 `probe`、`browse` 和 `read`。真实服务兼容矩阵仍待在测试环境执行；条件写入、删除、监听、凭据安全存储与认证属于后续垂直切片。

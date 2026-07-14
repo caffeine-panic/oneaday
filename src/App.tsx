@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ROOT_ADDRESS,
+  cancelOperation,
   closeConnection,
   errorMessage,
+  isCancelled,
   listResources,
-  loadProfiles,
+  loadConnectionProfiles,
   newConnectionId,
   openConnection,
   readResource,
   registryCapabilities,
-  saveProfiles,
+  saveConnectionProfiles,
   type AdapterDescriptor,
   type AdapterId,
   type ConnectionProfile,
@@ -78,6 +80,8 @@ function addressLabel(address: ResourceAddress) {
       return "/";
     case "etcd":
       return "etcd key";
+    case "etcdPrefix":
+      return "etcd prefix";
     case "zookeeper":
       return address.path;
     case "nacosConfig":
@@ -87,7 +91,7 @@ function addressLabel(address: ResourceAddress) {
 
 export function App() {
   const [capabilities, setCapabilities] = useState<AdapterDescriptor[]>();
-  const [profiles, setProfiles] = useState<ConnectionProfile[]>(loadProfiles);
+  const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [sessions, setSessions] = useState<Record<string, ConnectionSession>>({});
   const [selectedId, setSelectedId] = useState<string>();
   const [rows, setRows] = useState<TreeRow[]>([]);
@@ -95,6 +99,7 @@ export function App() {
   const [selectedAddress, setSelectedAddress] = useState<ResourceAddress>();
   const [filter, setFilter] = useState("");
   const [busy, setBusy] = useState(false);
+  const [activeOperation, setActiveOperation] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<ConnectionProfile>(emptyForm);
@@ -106,9 +111,10 @@ export function App() {
     registryCapabilities()
       .then(setCapabilities)
       .catch((reason: unknown) => setMessage(errorMessage(reason)));
+    loadConnectionProfiles()
+      .then(setProfiles)
+      .catch((reason: unknown) => setMessage(errorMessage(reason)));
   }, []);
-
-  useEffect(() => saveProfiles(profiles), [profiles]);
 
   const visibleRows = useMemo(() => {
     const query = filter.trim().toLocaleLowerCase();
@@ -118,14 +124,52 @@ export function App() {
     );
   }, [filter, rows]);
 
+  const startOperation = () => {
+    const operationId = newConnectionId();
+    setActiveOperation(operationId);
+    return operationId;
+  };
+
+  const finishOperation = (operationId: string) => {
+    setActiveOperation((current) => current === operationId ? undefined : current);
+  };
+
+  const runList = async (
+    connectionId: string,
+    parent: ResourceAddress,
+    cursor?: string,
+  ) => {
+    const operationId = startOperation();
+    try {
+      return await listResources(connectionId, parent, operationId, cursor);
+    } finally {
+      finishOperation(operationId);
+    }
+  };
+
+  const cancelActiveOperation = async () => {
+    if (!activeOperation) return;
+    try {
+      await cancelOperation(activeOperation);
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    }
+  };
+
   const connectAndLoad = async (profile: ConnectionProfile) => {
     setBusy(true);
     setMessage(undefined);
     setDocument(undefined);
     setRows([]);
     try {
-      const session = await openConnection(profile);
-      const page = await listResources(session.id, ROOT_ADDRESS);
+      const operationId = startOperation();
+      let session: ConnectionSession;
+      try {
+        session = await openConnection(profile, operationId);
+      } finally {
+        finishOperation(operationId);
+      }
+      const page = await runList(session.id, ROOT_ADDRESS);
       setSessions((current) => ({ ...current, [session.id]: session }));
       setSelectedId(session.id);
       setRows(pageRows(page.items, 0, page.parent, page.nextCursor));
@@ -150,9 +194,15 @@ export function App() {
       setMessage("连接名称和 endpoint 不能为空");
       return;
     }
-    setProfiles((current) => [...current.filter((item) => item.id !== candidate.id), candidate]);
-    setDialogOpen(false);
-    await connectAndLoad(candidate);
+    const nextProfiles = [...profiles.filter((item) => item.id !== candidate.id), candidate];
+    try {
+      await saveConnectionProfiles(nextProfiles);
+      setProfiles(nextProfiles);
+      setDialogOpen(false);
+      await connectAndLoad(candidate);
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    }
   };
 
   const selectProfile = async (profile: ConnectionProfile) => {
@@ -168,7 +218,7 @@ export function App() {
     setBusy(true);
     setMessage(undefined);
     try {
-      const page = await listResources(selectedSession.id, ROOT_ADDRESS);
+      const page = await runList(selectedSession.id, ROOT_ADDRESS);
       setRows(pageRows(page.items, 0, page.parent, page.nextCursor));
     } catch (reason) {
       setMessage(errorMessage(reason));
@@ -184,12 +234,15 @@ export function App() {
 
     if (row.node.readable) {
       setBusy(true);
+      const operationId = startOperation();
       try {
-        setDocument(await readResource(selectedSession.id, row.node.address));
+        setDocument(await readResource(selectedSession.id, row.node.address, operationId));
       } catch (reason) {
         setDocument(undefined);
         setMessage(errorMessage(reason));
+        if (isCancelled(reason)) return;
       } finally {
+        finishOperation(operationId);
         setBusy(false);
       }
     }
@@ -209,7 +262,7 @@ export function App() {
 
     setBusy(true);
     try {
-      const page = await listResources(selectedSession.id, row.node.address);
+      const page = await runList(selectedSession.id, row.node.address);
       setRows((current) => {
         const next = [...current];
         next[index] = {
@@ -238,7 +291,7 @@ export function App() {
     if (!selectedSession || busy) return;
     setBusy(true);
     try {
-      const page = await listResources(selectedSession.id, row.parent, row.cursor);
+      const page = await runList(selectedSession.id, row.parent, row.cursor);
       setRows((current) => {
         const next = [...current];
         next.splice(
@@ -371,7 +424,7 @@ export function App() {
               </button>
             );
           })}
-          {busy && <div className="loading-line">正在与注册中心通信…</div>}
+          {busy && <div className="loading-line">正在与注册中心通信… {activeOperation && <button onClick={() => void cancelActiveOperation()}>取消</button>}</div>}
         </section>
 
         <main className="detail">

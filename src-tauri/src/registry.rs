@@ -1,10 +1,11 @@
 mod adapters;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use adapters::RegistrySession;
 
@@ -60,7 +61,7 @@ pub struct ConnectionProfile {
 }
 
 impl ConnectionProfile {
-    fn validate(&mut self) -> Result<(), RegistryError> {
+    pub(crate) fn validate(&mut self) -> Result<(), RegistryError> {
         self.id = self.id.trim().to_owned();
         self.name = self.name.trim().to_owned();
         self.endpoint = self.endpoint.trim().to_owned();
@@ -100,6 +101,7 @@ pub struct ConnectionProbe {
 pub enum ResourceAddress {
     Root,
     Etcd { key_base64: String },
+    EtcdPrefix { prefix_base64: String },
     Zookeeper { path: String },
     NacosConfig { group: String, data_id: String },
 }
@@ -122,6 +124,28 @@ pub struct ResourcePage {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourcePageRequest {
+    pub parent: ResourceAddress,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct OperationId(String);
+
+impl OperationId {
+    pub fn new(value: impl Into<String>) -> Result<Self, RegistryError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(RegistryError::validation("operation id cannot be blank"));
+        }
+        Ok(Self(value))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueEncoding {
@@ -138,6 +162,8 @@ pub struct EncodedValue {
 }
 
 impl EncodedValue {
+    pub const MAX_INLINE_BYTES: usize = 1024 * 1024;
+
     pub fn from_bytes(bytes: &[u8]) -> Self {
         match std::str::from_utf8(bytes) {
             Ok(content) => Self {
@@ -151,6 +177,21 @@ impl EncodedValue {
                 size_bytes: bytes.len(),
             },
         }
+    }
+
+    pub fn try_from_inline_bytes(bytes: &[u8]) -> Result<Self, RegistryError> {
+        if bytes.len() > Self::MAX_INLINE_BYTES {
+            return Err(RegistryError::new(
+                RegistryErrorCode::ValueTooLarge,
+                format!(
+                    "resource is {} bytes; inline display is limited to {} bytes",
+                    bytes.len(),
+                    Self::MAX_INLINE_BYTES
+                ),
+                false,
+            ));
+        }
+        Ok(Self::from_bytes(bytes))
     }
 }
 
@@ -175,6 +216,9 @@ pub enum RegistryErrorCode {
     Network,
     InvalidResponse,
     Timeout,
+    ValueTooLarge,
+    Storage,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -225,6 +269,18 @@ impl RegistryError {
             true,
         )
     }
+
+    pub(crate) fn storage(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::Storage, message, false)
+    }
+
+    fn cancelled() -> Self {
+        Self::new(
+            RegistryErrorCode::Cancelled,
+            "operation was cancelled",
+            true,
+        )
+    }
 }
 
 #[derive(Default)]
@@ -246,7 +302,7 @@ impl RegistryCatalog {
         &self,
         adapter: AdapterId,
         endpoint: &str,
-    ) -> Result<ConnectionProbe, String> {
+    ) -> Result<ConnectionProbe, RegistryError> {
         let profile = ConnectionProfile {
             id: "probe".to_owned(),
             name: "Connection probe".to_owned(),
@@ -256,9 +312,7 @@ impl RegistryCatalog {
             nacos_api_version: NacosApiVersion::default(),
         };
 
-        RegistrySession::connect(&profile)
-            .await
-            .map_err(|error| error.message)?;
+        RegistrySession::connect(&profile).await?;
 
         Ok(ConnectionProbe {
             adapter,
@@ -270,6 +324,7 @@ impl RegistryCatalog {
 #[derive(Clone, Default)]
 pub struct RegistryService {
     sessions: Arc<RwLock<BTreeMap<String, RegistrySession>>>,
+    operations: Arc<RwLock<BTreeMap<OperationId, CancellationToken>>>,
 }
 
 impl RegistryService {
@@ -292,6 +347,16 @@ impl RegistryService {
         Ok(summary)
     }
 
+    pub async fn open_cancellable(
+        &self,
+        operation_id: OperationId,
+        profile: ConnectionProfile,
+    ) -> Result<ConnectionSession, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move { service.open(profile).await })
+            .await
+    }
+
     pub async fn close(&self, connection_id: &str) -> Result<(), RegistryError> {
         self.sessions
             .write()
@@ -312,6 +377,26 @@ impl RegistryService {
         session.list(parent, cursor, limit.clamp(1, 200)).await
     }
 
+    pub async fn list_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        request: ResourcePageRequest,
+    ) -> Result<ResourcePage, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            service
+                .list(
+                    &connection_id,
+                    request.parent,
+                    request.cursor,
+                    request.limit.unwrap_or(100),
+                )
+                .await
+        })
+        .await
+    }
+
     pub async fn read(
         &self,
         connection_id: &str,
@@ -319,6 +404,28 @@ impl RegistryService {
     ) -> Result<ResourceDocument, RegistryError> {
         let session = self.session(connection_id).await?;
         session.read(address).await
+    }
+
+    pub async fn read_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        address: ResourceAddress,
+    ) -> Result<ResourceDocument, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            service.read(&connection_id, address).await
+        })
+        .await
+    }
+
+    pub async fn cancel(&self, operation_id: &OperationId) -> bool {
+        if let Some(token) = self.operations.read().await.get(operation_id).cloned() {
+            token.cancel();
+            true
+        } else {
+            false
+        }
     }
 
     async fn session(&self, connection_id: &str) -> Result<RegistrySession, RegistryError> {
@@ -336,5 +443,29 @@ impl RegistryService {
             format!("connection '{connection_id}' is not open"),
             true,
         )
+    }
+
+    async fn run_operation<T>(
+        &self,
+        operation_id: OperationId,
+        operation: impl Future<Output = Result<T, RegistryError>>,
+    ) -> Result<T, RegistryError> {
+        let token = CancellationToken::new();
+        {
+            let mut operations = self.operations.write().await;
+            if operations.contains_key(&operation_id) {
+                return Err(RegistryError::validation(format!(
+                    "operation id '{}' is already active",
+                    operation_id.0
+                )));
+            }
+            operations.insert(operation_id.clone(), token.clone());
+        }
+        let result = tokio::select! {
+            result = operation => result,
+            () = token.cancelled() => Err(RegistryError::cancelled()),
+        };
+        self.operations.write().await.remove(&operation_id);
+        result
     }
 }

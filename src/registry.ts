@@ -28,6 +28,7 @@ export type ConnectionSession = {
 export type ResourceAddress =
   | { type: "root" }
   | { type: "etcd"; keyBase64: string }
+  | { type: "etcdPrefix"; prefixBase64: string }
   | { type: "zookeeper"; path: string }
   | { type: "nacosConfig"; group: string; dataId: string };
 
@@ -69,8 +70,16 @@ export function registryCapabilities() {
   return invoke<AdapterDescriptor[]>("registry_capabilities");
 }
 
-export function openConnection(profile: ConnectionProfile) {
-  return invoke<ConnectionSession>("open_connection", { profile });
+export function loadConnectionProfiles() {
+  return invoke<ConnectionProfile[]>("load_connection_profiles");
+}
+
+export function saveConnectionProfiles(profiles: ConnectionProfile[]) {
+  return invoke<void>("save_connection_profiles", { profiles });
+}
+
+export function openConnection(profile: ConnectionProfile, operationId: string) {
+  return invoke<ConnectionSession>("open_connection", { profile, operationId });
 }
 
 export function closeConnection(connectionId: string) {
@@ -80,17 +89,30 @@ export function closeConnection(connectionId: string) {
 export function listResources(
   connectionId: string,
   parent: ResourceAddress,
+  operationId: string,
   cursor?: string,
 ) {
   return invoke<ResourcePage>("list_resources", {
-    request: { connectionId, parent, cursor, limit: 100 },
+    request: {
+      connectionId,
+      operationId,
+      page: { parent, cursor, limit: 100 },
+    },
   });
 }
 
-export function readResource(connectionId: string, address: ResourceAddress) {
+export function readResource(
+  connectionId: string,
+  address: ResourceAddress,
+  operationId: string,
+) {
   return invoke<ResourceDocument>("read_resource", {
-    request: { connectionId, address },
+    request: { connectionId, address, operationId },
   });
+}
+
+export function cancelOperation(operationId: string) {
+  return invoke<boolean>("cancel_operation", { operationId });
 }
 
 export function errorMessage(reason: unknown): string {
@@ -101,19 +123,8 @@ export function errorMessage(reason: unknown): string {
   return String(reason);
 }
 
-const STORAGE_KEY = "atlas-registry.connections.v1";
-
-export function loadProfiles(): ConnectionProfile[] {
-  try {
-    const value = localStorage.getItem(STORAGE_KEY);
-    return value ? (JSON.parse(value) as ConnectionProfile[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-export function saveProfiles(profiles: ConnectionProfile[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
+export function isCancelled(reason: unknown): boolean {
+  return Boolean(reason && typeof reason === "object" && "code" in reason && reason.code === "cancelled");
 }
 
 export function newConnectionId(): string {

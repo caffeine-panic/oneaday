@@ -18,7 +18,7 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone)]
 pub(super) enum RegistrySession {
-    Etcd(etcd_client::Client),
+    Etcd(Box<etcd_client::Client>),
     Zookeeper(zookeeper_client::Client),
     Nacos(NacosSession),
 }
@@ -57,7 +57,9 @@ impl RegistrySession {
     ) -> Result<ResourcePage, RegistryError> {
         tokio::time::timeout(OPERATION_TIMEOUT, async {
             match self {
-                Self::Etcd(client) => list_etcd(client.clone(), parent, cursor, limit).await,
+                Self::Etcd(client) => {
+                    list_etcd(client.as_ref().clone(), parent, cursor, limit).await
+                }
                 Self::Zookeeper(client) => list_zookeeper(client, parent, cursor, limit).await,
                 Self::Nacos(session) => list_nacos(session, parent, cursor, limit).await,
             }
@@ -72,7 +74,7 @@ impl RegistrySession {
     ) -> Result<ResourceDocument, RegistryError> {
         tokio::time::timeout(OPERATION_TIMEOUT, async {
             match self {
-                Self::Etcd(client) => read_etcd(client.clone(), address).await,
+                Self::Etcd(client) => read_etcd(client.as_ref().clone(), address).await,
                 Self::Zookeeper(client) => read_zookeeper(client, address).await,
                 Self::Nacos(session) => read_nacos(session, address).await,
             }
@@ -94,7 +96,7 @@ impl RegistrySession {
         client.status().await.map_err(|error| {
             RegistryError::network(format!("etcd status request failed: {error}"))
         })?;
-        Ok(Self::Etcd(client))
+        Ok(Self::Etcd(Box::new(client)))
     }
 
     async fn connect_zookeeper(profile: &ConnectionProfile) -> Result<Self, RegistryError> {
@@ -162,22 +164,17 @@ async fn list_etcd(
     cursor: Option<String>,
     limit: usize,
 ) -> Result<ResourcePage, RegistryError> {
-    let parent_key = match &parent {
+    let parent_prefix = match &parent {
         ResourceAddress::Root => Vec::new(),
-        ResourceAddress::Etcd { key_base64 } => decode_base64(key_base64, "etcd key")?,
+        ResourceAddress::EtcdPrefix { prefix_base64 } => {
+            decode_base64(prefix_base64, "etcd prefix")?
+        }
         _ => return Err(adapter_mismatch(AdapterId::Etcd, &parent)),
-    };
-    let search_prefix = if parent_key.is_empty() {
-        Vec::new()
-    } else {
-        let mut prefix = parent_key.clone();
-        prefix.push(b'/');
-        prefix
     };
     let start = match cursor {
         Some(cursor) => decode_base64(&cursor, "etcd page cursor")?,
-        None if search_prefix.is_empty() => vec![0],
-        None => search_prefix.clone(),
+        None if parent_prefix.is_empty() => vec![0],
+        None => parent_prefix.clone(),
     };
 
     let scan_limit = (limit.saturating_mul(64)).clamp(256, 4096) as i64;
@@ -185,10 +182,10 @@ async fn list_etcd(
         .with_keys_only()
         .with_limit(scan_limit)
         .with_sort(SortTarget::Key, SortOrder::Ascend);
-    options = if search_prefix.is_empty() {
+    options = if parent_prefix.is_empty() {
         options.with_from_key()
     } else {
-        options.with_range(prefix_end(&search_prefix))
+        options.with_range(prefix_end(&parent_prefix))
     };
 
     let response = client
@@ -198,7 +195,8 @@ async fn list_etcd(
     let mut children = BTreeMap::<Vec<u8>, EtcdChild>::new();
     for key_value in response.kvs() {
         let key = key_value.key();
-        if let Some((child_key, readable, has_children)) = etcd_immediate_child(&parent_key, key) {
+        if let Some((child_key, readable, has_children)) = etcd_immediate_child(&parent_prefix, key)
+        {
             let child = children.entry(child_key).or_default();
             child.readable |= readable;
             child.has_children |= has_children;
@@ -216,13 +214,22 @@ async fn list_etcd(
     };
     let items = selected
         .into_iter()
-        .map(|(key, child)| ResourceNode {
-            name: display_etcd_name(&parent_key, &key),
-            address: ResourceAddress::Etcd {
-                key_base64: STANDARD.encode(&key),
-            },
-            readable: child.readable,
-            has_children: Some(child.has_children),
+        .map(|(key, child)| {
+            let address = if key.ends_with(b"/") {
+                ResourceAddress::EtcdPrefix {
+                    prefix_base64: STANDARD.encode(&key),
+                }
+            } else {
+                ResourceAddress::Etcd {
+                    key_base64: STANDARD.encode(&key),
+                }
+            };
+            ResourceNode {
+                name: display_etcd_name(&parent_prefix, &key),
+                address,
+                readable: child.readable,
+                has_children: Some(child.has_children),
+            }
         })
         .collect();
 
@@ -239,6 +246,9 @@ async fn read_etcd(
 ) -> Result<ResourceDocument, RegistryError> {
     let key = match &address {
         ResourceAddress::Etcd { key_base64 } => decode_base64(key_base64, "etcd key")?,
+        ResourceAddress::EtcdPrefix { prefix_base64 } => {
+            decode_base64(prefix_base64, "etcd prefix")?
+        }
         _ => return Err(adapter_mismatch(AdapterId::Etcd, &address)),
     };
     let response = client
@@ -263,7 +273,7 @@ async fn read_etcd(
     Ok(ResourceDocument {
         address,
         name: display_bytes(&key),
-        value: EncodedValue::from_bytes(key_value.value()),
+        value: EncodedValue::try_from_inline_bytes(key_value.value())?,
         content_type: infer_content_type(&key),
         version: Some(key_value.mod_revision().to_string()),
         metadata,
@@ -340,7 +350,7 @@ async fn read_zookeeper(
             .find(|part| !part.is_empty())
             .unwrap_or("/")
             .to_owned(),
-        value: EncodedValue::from_bytes(&data),
+        value: EncodedValue::try_from_inline_bytes(&data)?,
         content_type: infer_content_type(path.as_bytes()),
         version: Some(stat.version.to_string()),
         metadata,
@@ -528,7 +538,7 @@ async fn read_nacos(
     Ok(ResourceDocument {
         address,
         name: response.data_id().clone(),
-        value: EncodedValue::from_bytes(response.content().as_bytes()),
+        value: EncodedValue::try_from_inline_bytes(response.content().as_bytes())?,
         content_type: Some(response.content_type().clone()),
         version: Some(response.md5().clone()),
         metadata,
@@ -541,16 +551,12 @@ fn decode_base64(value: &str, label: &str) -> Result<Vec<u8>, RegistryError> {
         .map_err(|_| RegistryError::validation(format!("{label} is not valid base64")))
 }
 
-fn etcd_immediate_child(parent: &[u8], key: &[u8]) -> Option<(Vec<u8>, bool, bool)> {
-    let mut prefix = parent.to_vec();
-    if !prefix.is_empty() {
-        prefix.push(b'/');
-    }
-    let remaining = key.strip_prefix(prefix.as_slice())?;
+fn etcd_immediate_child(parent_prefix: &[u8], key: &[u8]) -> Option<(Vec<u8>, bool, bool)> {
+    let remaining = key.strip_prefix(parent_prefix)?;
     if remaining.is_empty() {
         return None;
     }
-    let separator = if parent.is_empty() && remaining.first() == Some(&b'/') {
+    let separator = if parent_prefix.is_empty() && remaining.first() == Some(&b'/') {
         remaining[1..]
             .iter()
             .position(|byte| *byte == b'/')
@@ -558,19 +564,19 @@ fn etcd_immediate_child(parent: &[u8], key: &[u8]) -> Option<(Vec<u8>, bool, boo
     } else {
         remaining.iter().position(|byte| *byte == b'/')
     };
-    let child_length = separator.unwrap_or(remaining.len());
-    let mut child = prefix;
-    child.extend_from_slice(&remaining[..child_length]);
-    let readable = key == child;
-    let has_children = key.get(child.len()) == Some(&b'/');
-    Some((child, readable, has_children))
+    match separator {
+        Some(index) => {
+            let mut child = parent_prefix.to_vec();
+            child.extend_from_slice(&remaining[..=index]);
+            Some((child.clone(), key == child, true))
+        }
+        None => Some((key.to_vec(), true, false)),
+    }
 }
 
 fn etcd_cursor_after(key: &[u8], has_children: bool) -> Vec<u8> {
     if has_children {
-        let mut child_prefix = key.to_vec();
-        child_prefix.push(b'/');
-        prefix_end(&child_prefix)
+        prefix_end(key)
     } else {
         let mut next = key.to_vec();
         next.push(0);
@@ -589,14 +595,11 @@ fn prefix_end(prefix: &[u8]) -> Vec<u8> {
     vec![0]
 }
 
-fn display_etcd_name(parent: &[u8], key: &[u8]) -> String {
-    let relative = if parent.is_empty() {
+fn display_etcd_name(parent_prefix: &[u8], key: &[u8]) -> String {
+    let relative = if parent_prefix.is_empty() {
         key
     } else {
-        key.strip_prefix(parent)
-            .unwrap_or(key)
-            .strip_prefix(b"/")
-            .unwrap_or(key)
+        key.strip_prefix(parent_prefix).unwrap_or(key)
     };
     display_bytes(relative)
 }

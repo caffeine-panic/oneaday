@@ -1,6 +1,7 @@
 use atlas_registry_lib::registry::{
     AdapterId, ConnectionProfile, NacosApiVersion, RegistryService, ResourceAddress,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 fn profile(adapter: AdapterId, endpoint: String) -> ConnectionProfile {
     ConnectionProfile {
@@ -25,10 +26,26 @@ fn etcd_live_session_can_browse_the_root() {
             .open(profile(AdapterId::Etcd, endpoint))
             .await
             .expect("etcd session should open");
-        service
+        let page = service
             .list(&session.id, ResourceAddress::Root, None, 100)
             .await
             .expect("etcd root should be listable");
+        service
+            .list(&session.id, page.parent, None, 100)
+            .await
+            .expect("the same etcd session should be reusable");
+        if let Ok(key) = std::env::var("ATLAS_TEST_ETCD_KEY") {
+            let document = service
+                .read(
+                    &session.id,
+                    ResourceAddress::Etcd {
+                        key_base64: STANDARD.encode(key),
+                    },
+                )
+                .await
+                .expect("configured etcd fixture should be readable");
+            assert!(document.metadata.contains_key("modRevision"));
+        }
     });
 }
 
@@ -44,10 +61,21 @@ fn zookeeper_live_session_can_browse_the_root() {
             .open(profile(AdapterId::Zookeeper, endpoint))
             .await
             .expect("ZooKeeper session should open");
-        service
+        let page = service
             .list(&session.id, ResourceAddress::Root, None, 100)
             .await
             .expect("ZooKeeper root should be listable");
+        service
+            .list(&session.id, page.parent, None, 100)
+            .await
+            .expect("the same ZooKeeper session should be reusable");
+        if let Ok(path) = std::env::var("ATLAS_TEST_ZOOKEEPER_PATH") {
+            let document = service
+                .read(&session.id, ResourceAddress::Zookeeper { path })
+                .await
+                .expect("configured ZooKeeper fixture should be readable");
+            assert!(document.metadata.contains_key("modifiedZxid"));
+        }
     });
 }
 
@@ -70,9 +98,23 @@ fn nacos_live_session_can_browse_the_config_list() {
             .open(connection)
             .await
             .expect("Nacos session should open");
-        service
+        let page = service
             .list(&session.id, ResourceAddress::Root, None, 100)
             .await
             .expect("Nacos config list should be browsable");
+        service
+            .list(&session.id, page.parent, None, 100)
+            .await
+            .expect("the same Nacos session should be reusable");
+        if let (Ok(group), Ok(data_id)) = (
+            std::env::var("ATLAS_TEST_NACOS_GROUP"),
+            std::env::var("ATLAS_TEST_NACOS_DATA_ID"),
+        ) {
+            let document = service
+                .read(&session.id, ResourceAddress::NacosConfig { group, data_id })
+                .await
+                .expect("configured Nacos fixture should be readable");
+            assert!(document.metadata.contains_key("md5"));
+        }
     });
 }

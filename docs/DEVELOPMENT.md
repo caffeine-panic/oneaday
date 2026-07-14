@@ -29,3 +29,12 @@ ATLAS_TEST_NACOS_NAMESPACE=public
 ```
 
 这些测试只执行连接与读取型列表操作，不会写入测试集群。认证、TLS 与写操作会在对应开发切片中加入独立环境矩阵。
+
+若要同时验证读取与元数据，提供已有的只读 fixture：
+
+```bash
+ATLAS_TEST_ETCD_KEY=/atlas/fixture \
+ATLAS_TEST_ZOOKEEPER_PATH=/atlas/fixture \
+ATLAS_TEST_NACOS_GROUP=DEFAULT_GROUP \
+ATLAS_TEST_NACOS_DATA_ID=atlas-fixture.yaml
+```

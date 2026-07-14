@@ -1,9 +1,10 @@
 use atlas_registry_lib::registry::{
-    AdapterId, AdapterStatus, Capability, EncodedValue, RegistryCatalog, ValueEncoding,
+    AdapterId, AdapterStatus, Capability, EncodedValue, RegistryCatalog, RegistryErrorCode,
+    ValueEncoding,
 };
 
 #[test]
-fn catalog_reports_only_the_native_capability_that_is_implemented() {
+fn catalog_reports_probe_browse_and_read_for_each_native_adapter() {
     let descriptors = RegistryCatalog.descriptors();
 
     assert_eq!(
@@ -39,9 +40,20 @@ fn utf8_resource_values_remain_editable_text() {
 }
 
 #[test]
+fn values_larger_than_the_inline_limit_are_kept_out_of_the_webview() {
+    let oversized = vec![b'a'; EncodedValue::MAX_INLINE_BYTES + 1];
+    let error = EncodedValue::try_from_inline_bytes(&oversized)
+        .expect_err("oversized values must not cross the Tauri boundary");
+
+    assert_eq!(error.code, RegistryErrorCode::ValueTooLarge);
+    assert!(!error.retryable);
+}
+
+#[test]
 fn connection_probe_rejects_a_blank_endpoint_before_using_a_protocol_client() {
     let error = tauri::async_runtime::block_on(RegistryCatalog.probe(AdapterId::Etcd, "   "))
         .expect_err("a blank endpoint must be rejected");
 
-    assert_eq!(error, "endpoint cannot be blank");
+    assert_eq!(error.code, RegistryErrorCode::Validation);
+    assert_eq!(error.message, "endpoint cannot be blank");
 }

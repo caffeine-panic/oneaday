@@ -34,7 +34,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## 当前开发边界
 
-- 已实现：方案 A 的 React 页面、Tauri 工程、长生命周期 Rust 会话、三协议真实连接、分页/懒加载浏览、资源读取、结构化错误和二进制安全展示。
+- 已实现：方案 A 的 React 页面、Tauri 工程、Rust 侧非敏感连接配置持久化、长生命周期会话、三协议真实连接、可取消的分页/懒加载浏览、资源读取、结构化错误、二进制安全展示和 1 MiB 大值保护。
 - 正在推进：条件写入、删除保护、凭据安全存储、认证/TLS、事件监听和生产环境保护。
 - adapter 只统一连接与资源操作外形；etcd lease/transaction、ZooKeeper ACL/ephemeral、Nacos namespace/service 保留各自语义。
 

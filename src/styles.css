@@ -153,6 +153,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .disclosure { width: 10px; flex: none; color: #75869b; font-size: 16px; }
 .load-more { color: #6aa9ff; }
 .loading-line { margin: 14px 8px; color: #91a0b2; font-size: 12px; }
+.loading-line button { margin-left: 6px; border: 0; color: #ff9ca2; background: transparent; cursor: pointer; }
 
 .empty {
   display: flex;

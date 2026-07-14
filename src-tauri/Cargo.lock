@@ -235,9 +235,11 @@ dependencies = [
  "nacos-sdk",
  "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
+ "tokio-util",
  "zookeeper-client",
 ]
 
@@ -4528,6 +4530,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
