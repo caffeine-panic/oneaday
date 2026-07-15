@@ -14,7 +14,7 @@ Atlas Registry 需要以桌面应用形式统一访问 etcd、ZooKeeper 和 Naco
 - etcd：`etcd-client` 0.19，启用系统 TLS roots。
 - ZooKeeper：`zookeeper-client` 0.11.1，启用 Tokio 与 TLS。
 - Nacos：`nacos-sdk` 0.8；Config 客户端负责连接与单配置读取，2.x legacy 管理接口和 3.x Admin API 负责配置分页列表；Naming 能力在后续垂直切片接入。
-- `RegistryCatalog` 声明 adapter descriptor 与能力；`RegistryService` 持有会话，并执行可取消的连接探测、浏览、读取和条件变更操作。
+- `RegistryCatalog` 声明 adapter descriptor 与能力；`RegistryService` 持有会话，并执行可取消的连接探测、浏览、有界标识搜索、读取和条件变更操作。
 - 公共能力可以统一；lease、transaction、ACL、ephemeral、namespace、service 等原生能力不能抹平。
 
 ## 结果
@@ -27,6 +27,6 @@ Atlas Registry 需要以桌面应用形式统一访问 etcd、ZooKeeper 和 Naco
 
 ## 当前进展
 
-技术 Spike 已结束。正式开发已实现长生命周期 session、可取消的按需浏览、资源读取、1 MiB WebView 大值边界，以及创建、条件更新/删除、冲突反馈、所有写入的连接名二次确认和本地脱敏审计。etcd 与 ZooKeeper 使用服务端原子条件；通用 ZooKeeper create 仅创建继承父 ACL 的持久节点，ephemeral/sequential 留给原生能力入口；Nacos 更新使用 MD5 CAS，创建和删除明确标记为检查后变更。连接配置已支持版本迁移，密码与 token 进入系统凭据库；etcd 用户名密码与 mTLS、ZooKeeper digest 与 TLS、Nacos 用户名密码和自定义鉴权上下文已接入原生会话。实时链路已接入 etcd revision watch、ZooKeeper one-shot watch 自动重新布防和 Nacos SDK listener；订阅具备显式取消、连接关闭联动清理、后端 64 槽有界事件通道，以及 reconnecting、compacted、session expired 等 UI 状态，事件边界不包含资源值。Nacos 通过管理 API 心跳把 SDK 内部重连状态显式映射到 UI。Nacos 鉴权隔离为独立策略模块，ZooKeeper SASL 仍沿用客户端 `Connector` 作为后续扩展入口，尚未启用具体机制。catalog 声明 `probe`、`browse`、`read`、`watch`、`create`、`update` 和 `delete`。真实服务完整兼容矩阵、SASL、发布加固及其余生产能力仍待后续切片执行。
+技术 Spike 已结束。正式开发已实现长生命周期 session、可取消的按需浏览、资源读取、1 MiB WebView 大值边界，以及创建、条件更新/删除、冲突反馈、所有写入的连接名二次确认和本地脱敏审计。etcd 与 ZooKeeper 使用服务端原子条件；通用 ZooKeeper create 仅创建继承父 ACL 的持久节点，ephemeral/sequential 留给原生能力入口；Nacos 更新使用 MD5 CAS，创建和删除明确标记为检查后变更。连接配置已支持版本迁移，密码与 token 进入系统凭据库；etcd 用户名密码与 mTLS、ZooKeeper digest 与 TLS、Nacos 用户名密码和自定义鉴权上下文已接入原生会话。实时链路已接入 etcd revision watch、ZooKeeper one-shot watch 自动重新布防和 Nacos SDK listener；订阅具备显式取消、连接关闭联动清理、后端 64 槽有界事件通道，以及 reconnecting、compacted、session expired 等 UI 状态，事件边界不包含资源值。Nacos 通过管理 API 心跳把 SDK 内部重连状态显式映射到 UI。标识搜索不读取 value：etcd 使用固定扫描窗口和游标，ZooKeeper 仅搜索当前层 children，Nacos 使用服务端 dataId 模糊分页；精确地址由读取接口直接定位。导出默认 metadata-only，包含 value 必须显式选择；导入文件受 8 MiB/50 条限制并验证摘要，value 只保存在 Rust 的 10 分钟一次性计划中，WebView 仅接收 create/update/skip 脱敏预览，实际写入复用条件变更和审计链路。Nacos 鉴权隔离为独立策略模块，ZooKeeper SASL 仍沿用客户端 `Connector` 作为后续扩展入口，尚未启用具体机制。catalog 声明 `probe`、`browse`、`search`、`read`、`watch`、`create`、`update` 和 `delete`。真实服务完整兼容矩阵、SASL、发布加固及其余生产能力仍待后续切片执行。
 
 Nacos SDK 0.8 的 `remove_listener` 会移除应用回调，但上游实现暂不会在最后一个回调移除后清除其 session 级 cache/listen；该 SDK cache 还会写入用户目录。应用事件通道与 UI 不会接收这些配置值，但在发布加固阶段必须通过升级、上游补丁或替换 listener 实现来收紧 SDK 的内存、磁盘与后台监听生命周期。

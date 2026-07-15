@@ -2,15 +2,17 @@ pub mod audit;
 pub mod connections;
 pub mod credentials;
 pub mod registry;
+pub mod transfer;
 
 use registry::{
     AdapterDescriptor, ConnectionProbe, ConnectionProfile, ConnectionSession, MutationPhase,
     MutationResult, OperationId, RegistryCatalog, RegistryError, RegistryService, ResourceAddress,
-    ResourceDocument, ResourceMutation, ResourcePage, ResourcePageRequest, SubscriptionId,
-    WatchEvent, WatchRequest,
+    ResourceDocument, ResourceMutation, ResourcePage, ResourcePageRequest, ResourceSearchPage,
+    ResourceSearchRequest, SubscriptionId, WatchEvent, WatchRequest,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State, ipc::Channel};
+use tauri_plugin_dialog::DialogExt;
 
 use connections::ConnectionStore;
 use credentials::{CredentialUpdate, CredentialVault, TransientCredential};
@@ -151,6 +153,28 @@ async fn read_resource(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SearchResourcesRequest {
+    connection_id: String,
+    operation_id: String,
+    search: ResourceSearchRequest,
+}
+
+#[tauri::command]
+async fn search_resources(
+    service: State<'_, RegistryService>,
+    request: SearchResourcesRequest,
+) -> Result<ResourceSearchPage, RegistryError> {
+    service
+        .search_cancellable(
+            OperationId::new(request.operation_id)?,
+            request.connection_id,
+            request.search,
+        )
+        .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MutateResourceRequest {
     connection_id: String,
     operation_id: String,
@@ -164,18 +188,37 @@ async fn mutate_resource<R: tauri::Runtime>(
     audit: State<'_, audit::AuditLog>,
     request: MutateResourceRequest,
 ) -> Result<MutationResult, RegistryError> {
-    request.mutation.validate()?;
-    let operation_id = OperationId::new(request.operation_id.clone())?;
     let directory = app_config_directory(&app)?;
+    execute_audited_mutation(
+        &directory,
+        service.inner(),
+        audit.inner(),
+        &request.connection_id,
+        &request.operation_id,
+        request.mutation,
+    )
+    .await
+}
+
+async fn execute_audited_mutation(
+    directory: &std::path::Path,
+    service: &RegistryService,
+    audit: &audit::AuditLog,
+    connection_id: &str,
+    operation_id: &str,
+    mutation: ResourceMutation,
+) -> Result<MutationResult, RegistryError> {
+    mutation.validate()?;
+    let registered_operation_id = OperationId::new(operation_id.to_owned())?;
     let phase = MutationPhase::default();
     let workflow_phase = phase.clone();
-    let workflow_service = service.inner().clone();
+    let workflow_service = service.clone();
     let result = service
-        .run_mutation_workflow(operation_id, phase, async {
-            let previous = match request.mutation.expected_version() {
+        .run_mutation_workflow(registered_operation_id, phase, async {
+            let previous = match mutation.expected_version() {
                 Some(expected_version) => {
                     let document = workflow_service
-                        .read(&request.connection_id, request.mutation.address().clone())
+                        .read(connection_id, mutation.address().clone())
                         .await?;
                     if document.version.as_deref() != Some(expected_version.trim()) {
                         return Err(RegistryError::conflict(format!(
@@ -190,28 +233,19 @@ async fn mutate_resource<R: tauri::Runtime>(
             };
             audit
                 .record_started_in(
-                    &directory,
-                    &request.connection_id,
-                    &request.operation_id,
-                    &request.mutation,
+                    directory,
+                    connection_id,
+                    operation_id,
+                    &mutation,
                     previous.as_ref(),
                 )
                 .await?;
             let result = workflow_service
-                .mutate_with_phase(
-                    &request.connection_id,
-                    request.mutation.clone(),
-                    workflow_phase.clone(),
-                )
+                .mutate_with_phase(connection_id, mutation.clone(), workflow_phase.clone())
                 .await?;
             workflow_phase.mark_finalizing();
             audit
-                .record_applied_in(
-                    &directory,
-                    &request.connection_id,
-                    &request.operation_id,
-                    &result,
-                )
+                .record_applied_in(directory, connection_id, operation_id, &result)
                 .await
                 .map_err(|error| {
                     RegistryError::audit_incomplete(format!(
@@ -227,25 +261,237 @@ async fn mutate_resource<R: tauri::Runtime>(
         Err(error) => {
             if error.code == registry::RegistryErrorCode::OutcomeUnknown {
                 let _ = audit
-                    .record_outcome_unknown_in(
-                        &directory,
-                        &request.connection_id,
-                        &request.operation_id,
-                    )
+                    .record_outcome_unknown_in(directory, connection_id, operation_id)
                     .await;
             } else if error.code != registry::RegistryErrorCode::AuditIncomplete {
                 let _ = audit
-                    .record_failed_in(
-                        &directory,
-                        &request.connection_id,
-                        &request.operation_id,
-                        error.code,
-                    )
+                    .record_failed_in(directory, connection_id, operation_id, error.code)
                     .await;
             }
             Err(error)
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportResourceRequest {
+    connection_id: String,
+    address: ResourceAddress,
+    include_value: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportReceipt {
+    file_name: String,
+    include_value: bool,
+    snapshot: registry::ResourceSnapshot,
+}
+
+#[tauri::command]
+async fn export_resource<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    service: State<'_, RegistryService>,
+    request: ExportResourceRequest,
+) -> Result<Option<ExportReceipt>, RegistryError> {
+    let document = service
+        .read(&request.connection_id, request.address)
+        .await?;
+    let snapshot = document.snapshot()?;
+    let bytes = transfer::build_export_file(&document, request.include_value, transfer::now_ms()?)?;
+    let suggested_name = transfer::suggested_export_file_name(&document);
+    let dialog_app = app.clone();
+    let chosen_path = tauri::async_runtime::spawn_blocking(move || {
+        dialog_app
+            .dialog()
+            .file()
+            .set_title("Export Atlas Registry resource")
+            .set_file_name(&suggested_name)
+            .add_filter("Atlas Registry export", &["json"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|error| RegistryError::storage(format!("export dialog failed: {error}")))?;
+    let Some(chosen_path) = chosen_path else {
+        return Ok(None);
+    };
+    let path = chosen_path.into_path().map_err(|error| {
+        RegistryError::storage(format!("export destination is not a local file: {error}"))
+    })?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&path)
+        .await
+        .map_err(|error| RegistryError::storage(format!("cannot create export file: {error}")))?;
+    use tokio::io::AsyncWriteExt as _;
+    file.write_all(&bytes)
+        .await
+        .map_err(|error| RegistryError::storage(format!("cannot write export file: {error}")))?;
+    file.sync_all()
+        .await
+        .map_err(|error| RegistryError::storage(format!("cannot sync export file: {error}")))?;
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "export.json".to_owned());
+    Ok(Some(ExportReceipt {
+        file_name,
+        include_value: request.include_value,
+        snapshot,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChooseImportRequest {
+    connection_id: String,
+}
+
+#[tauri::command]
+async fn choose_import<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    service: State<'_, RegistryService>,
+    transfers: State<'_, transfer::TransferService>,
+    request: ChooseImportRequest,
+) -> Result<Option<transfer::ImportPreview>, RegistryError> {
+    let dialog_app = app.clone();
+    let chosen_path = tauri::async_runtime::spawn_blocking(move || {
+        dialog_app
+            .dialog()
+            .file()
+            .set_title("Import Atlas Registry export")
+            .add_filter("Atlas Registry export", &["json"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|error| RegistryError::storage(format!("import dialog failed: {error}")))?;
+    let Some(chosen_path) = chosen_path else {
+        return Ok(None);
+    };
+    let path = chosen_path.into_path().map_err(|error| {
+        RegistryError::storage(format!("import source is not a local file: {error}"))
+    })?;
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|error| RegistryError::storage(format!("cannot open import file: {error}")))?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|error| RegistryError::storage(format!("cannot inspect import file: {error}")))?;
+    if metadata.len() > transfer::MAX_IMPORT_BYTES as u64 {
+        return Err(RegistryError::validation(format!(
+            "import file is larger than {} MiB",
+            transfer::MAX_IMPORT_BYTES / (1024 * 1024)
+        )));
+    }
+    use tokio::io::AsyncReadExt as _;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(transfer::MAX_IMPORT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| RegistryError::storage(format!("cannot read import file: {error}")))?;
+    if bytes.len() > transfer::MAX_IMPORT_BYTES {
+        return Err(RegistryError::validation(format!(
+            "import file is larger than {} MiB",
+            transfer::MAX_IMPORT_BYTES / (1024 * 1024)
+        )));
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "import.json".to_owned());
+    transfers
+        .prepare_import(service.inner(), &request.connection_id, file_name, &bytes)
+        .await
+        .map(Some)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyImportRequest {
+    connection_id: String,
+    plan_id: String,
+    operation_id: String,
+    confirmed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportAppliedItem {
+    item: transfer::ImportPreviewItem,
+    consistency: registry::MutationConsistency,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportFailure {
+    item: transfer::ImportPreviewItem,
+    error: RegistryError,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportApplyResult {
+    applied: Vec<ImportAppliedItem>,
+    failed: Option<ImportFailure>,
+    remaining: usize,
+}
+
+#[tauri::command]
+async fn apply_import<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    service: State<'_, RegistryService>,
+    audit: State<'_, audit::AuditLog>,
+    transfers: State<'_, transfer::TransferService>,
+    request: ApplyImportRequest,
+) -> Result<ImportApplyResult, RegistryError> {
+    if !request.confirmed {
+        return Err(RegistryError::validation(
+            "import requires explicit confirmation",
+        ));
+    }
+    OperationId::new(request.operation_id.clone())?;
+    let directory = app_config_directory(&app)?;
+    let plan = transfers
+        .take_plan(&request.plan_id, &request.connection_id)
+        .await?;
+    let total = plan.entries.len();
+    let mut applied = Vec::with_capacity(total);
+    for (index, entry) in plan.entries.into_iter().enumerate() {
+        match execute_audited_mutation(
+            &directory,
+            service.inner(),
+            audit.inner(),
+            &request.connection_id,
+            &request.operation_id,
+            entry.mutation,
+        )
+        .await
+        {
+            Ok(result) => applied.push(ImportAppliedItem {
+                item: entry.preview,
+                consistency: result.consistency,
+            }),
+            Err(error) => {
+                return Ok(ImportApplyResult {
+                    applied,
+                    failed: Some(ImportFailure {
+                        item: entry.preview,
+                        error,
+                    }),
+                    remaining: total - index - 1,
+                });
+            }
+        }
+    }
+    Ok(ImportApplyResult {
+        applied,
+        failed: None,
+        remaining: 0,
+    })
 }
 
 #[tauri::command]
@@ -309,9 +555,11 @@ pub fn run() {
 
 fn configured_builder<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder
+        .plugin(tauri_plugin_dialog::init())
         .manage(RegistryService::default())
         .manage(audit::AuditLog::default())
         .manage(CredentialVault::system())
+        .manage(transfer::TransferService::default())
         .invoke_handler(tauri::generate_handler![
             registry_capabilities,
             probe_connection,
@@ -322,7 +570,11 @@ fn configured_builder<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::B
             close_connection,
             list_resources,
             read_resource,
+            search_resources,
             mutate_resource,
+            export_resource,
+            choose_import,
+            apply_import,
             cancel_operation,
             start_watch,
             stop_watch
@@ -356,7 +608,7 @@ mod command_tests {
                 .as_array()
                 .expect("adapter array")
                 .iter()
-                .all(|adapter| adapter["capabilities"].as_array().map(Vec::len) == Some(7))
+                .all(|adapter| adapter["capabilities"].as_array().map(Vec::len) == Some(8))
         );
 
         let watch_error = test::get_ipc_response(
@@ -378,6 +630,44 @@ mod command_tests {
         )
         .expect_err("root watch should be rejected by the public command");
         assert_eq!(watch_error["code"], "validation");
+
+        let search_error = test::get_ipc_response(
+            &webview,
+            request(
+                "search_resources",
+                json!({
+                    "request": {
+                        "connectionId": "missing",
+                        "operationId": "blank-search",
+                        "search": {
+                            "scope": { "type": "root" },
+                            "query": "   ",
+                            "cursor": null,
+                            "limit": 100
+                        }
+                    }
+                }),
+            ),
+        )
+        .expect_err("blank search should be rejected by the public command");
+        assert_eq!(search_error["code"], "validation");
+
+        let import_error = test::get_ipc_response(
+            &webview,
+            request(
+                "apply_import",
+                json!({
+                    "request": {
+                        "connectionId": "missing",
+                        "planId": "missing",
+                        "operationId": "unconfirmed-import",
+                        "confirmed": false
+                    }
+                }),
+            ),
+        )
+        .expect_err("unconfirmed import should be rejected by the public command");
+        assert_eq!(import_error["code"], "validation");
 
         let error = test::get_ipc_response(
             &webview,

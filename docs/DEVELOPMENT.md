@@ -28,7 +28,7 @@ ATLAS_TEST_NACOS_VERSION=v3
 ATLAS_TEST_NACOS_NAMESPACE=public
 ```
 
-默认情况下这些测试只执行连接、读取与列表操作，不会写入测试集群。
+默认情况下这些测试只执行连接、读取、列表与 value-free 标识搜索，不会写入测试集群。
 
 认证测试可按协议提供 `ATLAS_TEST_<PROTOCOL>_USERNAME` 与
 `ATLAS_TEST_<PROTOCOL>_PASSWORD`（`PROTOCOL` 为 `ETCD`、`ZOOKEEPER` 或
@@ -72,3 +72,5 @@ ZooKeeper 的 mutation parent 必须预先存在。Nacos create/delete 没有服
 ## 本地审计
 
 mutation command 会在应用配置目录的 `mutation-audit.jsonl` 写入 JSON Lines。started 事件在触发远端变更前同步落盘，并包含变更前的版本、大小、编码与 SHA-256 摘要；applied 事件记录远端返回的前后摘要。单条追加会在独立任务中完成 `write_all + sync_data`，不会被操作取消切断。取消、超时或提交后传输错误导致远端结果无法判定时会写入独立的 `mutationOutcomeUnknown` 事件；远端已确认成功但 applied 审计落盘失败则返回独立的 `auditIncomplete` 错误，不会伪装成远端结果未知。日志不记录资源 value、密码或 token。
+
+批量导入逐条复用同一套条件变更与审计流程。遇到首个失败即停止，返回已应用、失败和未执行数量；导入计划在预览后只能使用一次。

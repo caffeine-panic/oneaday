@@ -2,8 +2,8 @@ use atlas_registry_lib::{
     credentials::ConnectionSecret,
     registry::{
         AdapterId, AuthenticationMode, ConnectionAuth, ConnectionProfile, MutationValue,
-        NacosApiVersion, RegistryService, ResourceAddress, ResourceMutation, SubscriptionId,
-        TlsProfile, ValueEncoding, WatchEvent, WatchRequest, WatchStatusState,
+        NacosApiVersion, RegistryService, ResourceAddress, ResourceMutation, ResourceSearchRequest,
+        SubscriptionId, TlsProfile, ValueEncoding, WatchEvent, WatchRequest, WatchStatusState,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -104,6 +104,18 @@ fn etcd_live_session_can_browse_the_root() {
             .list(&session.id, page.parent, None, 100)
             .await
             .expect("the same etcd session should be reusable");
+        service
+            .search(
+                &session.id,
+                ResourceSearchRequest {
+                    scope: ResourceAddress::Root,
+                    query: "atlas".to_owned(),
+                    cursor: None,
+                    limit: Some(25),
+                },
+            )
+            .await
+            .expect("etcd identifiers should be searchable without reading values");
         if let Ok(key) = std::env::var("ATLAS_TEST_ETCD_KEY") {
             let document = service
                 .read(
@@ -148,6 +160,18 @@ fn zookeeper_live_session_can_browse_the_root() {
             .list(&session.id, page.parent, None, 100)
             .await
             .expect("the same ZooKeeper session should be reusable");
+        service
+            .search(
+                &session.id,
+                ResourceSearchRequest {
+                    scope: ResourceAddress::Root,
+                    query: "atlas".to_owned(),
+                    cursor: None,
+                    limit: Some(25),
+                },
+            )
+            .await
+            .expect("ZooKeeper child identifiers should be searchable without reading data");
         if let Ok(path) = std::env::var("ATLAS_TEST_ZOOKEEPER_PATH") {
             let document = service
                 .read(&session.id, ResourceAddress::Zookeeper { path })
@@ -197,6 +221,18 @@ fn nacos_live_session_can_browse_the_config_list() {
             .list(&session.id, page.parent, None, 100)
             .await
             .expect("the same Nacos session should be reusable");
+        service
+            .search(
+                &session.id,
+                ResourceSearchRequest {
+                    scope: ResourceAddress::Root,
+                    query: "atlas".to_owned(),
+                    cursor: None,
+                    limit: Some(25),
+                },
+            )
+            .await
+            .expect("Nacos dataIds should be searchable without reading config content");
         if let (Ok(group), Ok(data_id)) = (
             std::env::var("ATLAS_TEST_NACOS_GROUP"),
             std::env::var("ATLAS_TEST_NACOS_DATA_ID"),

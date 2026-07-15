@@ -5,13 +5,17 @@ import {
   type NewResourceDraft,
 } from "./MutationDialogs";
 import { ConnectionDialog, type ConnectionDialogMode } from "./ConnectionDialog";
+import { ExportDialog, ImportPreviewDialog } from "./TransferDialogs";
 import {
   ROOT_ADDRESS,
+  applyImport,
   cancelOperation,
+  chooseImport,
   closeConnection,
   connectionEnvironmentLabels,
   deleteConnectionProfile,
   errorMessage,
+  exportResource,
   isCancelled,
   isNotFound,
   isOutcomeUnknown,
@@ -23,6 +27,7 @@ import {
   probeConnection,
   readResource,
   registryCapabilities,
+  searchResources,
   startWatch,
   stopWatch,
   upsertConnectionProfile,
@@ -30,6 +35,7 @@ import {
   type AdapterId,
   type ConnectionProfile,
   type ConnectionSession,
+  type ImportPreview,
   type ResourceAddress,
   type ResourceDocument,
   type ResourceNode,
@@ -51,6 +57,10 @@ type MoreRow = {
   parent: ResourceAddress;
   cursor: string;
   depth: number;
+  search?: {
+    scope: ResourceAddress;
+    query: string;
+  };
 };
 
 type TreeRow = ResourceRow | MoreRow;
@@ -65,6 +75,13 @@ type ResourceWatchView = {
   changeCount: number;
   lastChange?: WatchChangeEvent;
   remoteChanged: boolean;
+};
+
+type ActiveSearch = {
+  scope: ResourceAddress;
+  query: string;
+  scanned: number;
+  exhaustive: boolean;
 };
 
 const watchStatusLabels: Record<WatchStatusState, string> = {
@@ -128,6 +145,24 @@ function pageRows(
   return rows;
 }
 
+function searchPageRows(
+  items: ResourceNode[],
+  scope: ResourceAddress,
+  query: string,
+  nextCursor?: string,
+): TreeRow[] {
+  const rows: TreeRow[] = items.map((node) => ({
+    kind: "resource",
+    node,
+    depth: 0,
+    expanded: false,
+  }));
+  if (nextCursor) {
+    rows.push({ kind: "more", parent: scope, cursor: nextCursor, depth: 0, search: { scope, query } });
+  }
+  return rows;
+}
+
 function connectionLabel(adapter: AdapterId) {
   return adapter === "zookeeper" ? "ZK" : adapter;
 }
@@ -179,6 +214,40 @@ function utf8Base64(value: string) {
   return btoa(binary);
 }
 
+function locateAddress(adapter: AdapterId, rawInput: string): ResourceAddress {
+  const input = rawInput.trim();
+  if (!input) throw new Error("请输入要定位的资源标识");
+  if (adapter === "etcd") {
+    if (!input.startsWith("base64:")) return { type: "etcd", keyBase64: utf8Base64(input) };
+    const keyBase64 = input.slice("base64:".length).trim();
+    try {
+      atob(keyBase64);
+    } catch {
+      throw new Error("base64: 后面的 etcd key 不是有效 Base64");
+    }
+    if (!keyBase64) throw new Error("etcd key 不能为空");
+    return { type: "etcd", keyBase64 };
+  }
+  if (adapter === "zookeeper") {
+    if (!input.startsWith("/") || input.includes("//") || (input.length > 1 && input.endsWith("/"))) {
+      throw new Error("ZooKeeper 路径必须是规范的绝对路径");
+    }
+    return { type: "zookeeper", path: input };
+  }
+  const separator = input.indexOf(" / ");
+  if (separator < 1) throw new Error("Nacos 定位格式为 GROUP / dataId");
+  const group = input.slice(0, separator).trim();
+  const dataId = input.slice(separator + 3).trim();
+  if (!group || !dataId) throw new Error("Nacos 定位需要 group 和 dataId");
+  return { type: "nacosConfig", group, dataId };
+}
+
+function searchScope(adapter: AdapterId, selected?: ResourceAddress): ResourceAddress {
+  if (adapter === "etcd" && selected?.type === "etcdPrefix") return selected;
+  if (adapter === "zookeeper" && selected?.type === "zookeeper") return selected;
+  return ROOT_ADDRESS;
+}
+
 export function App() {
   const [capabilities, setCapabilities] = useState<AdapterDescriptor[]>();
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
@@ -189,6 +258,8 @@ export function App() {
   const [draftValue, setDraftValue] = useState("");
   const [selectedAddress, setSelectedAddress] = useState<ResourceAddress>();
   const [filter, setFilter] = useState("");
+  const [resourceQuery, setResourceQuery] = useState("");
+  const [activeSearch, setActiveSearch] = useState<ActiveSearch>();
   const [busy, setBusy] = useState(false);
   const [activeOperation, setActiveOperation] = useState<string>();
   const [message, setMessage] = useState<string>();
@@ -201,6 +272,10 @@ export function App() {
   const [resourceDraft, setResourceDraft] = useState<NewResourceDraft>(() => emptyResourceDraft("etcd"));
   const [pendingMutation, setPendingMutation] = useState<ResourceMutation>();
   const [confirmationText, setConfirmationText] = useState("");
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportIncludeValue, setExportIncludeValue] = useState(false);
+  const [importPreview, setImportPreview] = useState<ImportPreview>();
+  const [importConfirmationText, setImportConfirmationText] = useState("");
   const [resourceWatch, setResourceWatch] = useState<ResourceWatchView>();
   const watchHandle = useRef<WatchHandle | undefined>(undefined);
   const watchGeneration = useRef(0);
@@ -258,6 +333,20 @@ export function App() {
     const operationId = startOperation();
     try {
       return await readResource(connectionId, address, operationId);
+    } finally {
+      finishOperation(operationId);
+    }
+  };
+
+  const runSearch = async (
+    connectionId: string,
+    scope: ResourceAddress,
+    query: string,
+    cursor?: string,
+  ) => {
+    const operationId = startOperation();
+    try {
+      return await searchResources(connectionId, scope, query, operationId, cursor);
     } finally {
       finishOperation(operationId);
     }
@@ -389,6 +478,7 @@ export function App() {
   const reloadRoot = async (connectionId: string) => {
     const page = await runList(connectionId, ROOT_ADDRESS);
     setRows(pageRows(page.items, 0, page.parent, page.nextCursor));
+    setActiveSearch(undefined);
   };
 
   const cancelActiveOperation = async () => {
@@ -479,12 +569,81 @@ export function App() {
     await stopActiveWatch();
     setSelectedId(profile.id);
     setRows([]);
+    setActiveSearch(undefined);
+    setExportDialogOpen(false);
+    setImportPreview(undefined);
     showDocument(undefined);
     setSelectedAddress(undefined);
     setMessage(sessions[profile.id] ? "连接会话已打开，点击刷新加载资源" : undefined);
   };
 
   const refreshRoot = async () => {
+    if (!selectedSession || busy) return;
+    setBusy(true);
+    setMessage(undefined);
+    try {
+      await reloadRoot(selectedSession.id);
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const searchCurrentScope = async () => {
+    if (!selectedSession || !selectedProfile || busy) return;
+    const query = resourceQuery.trim();
+    if (!query) {
+      setMessage("请输入要搜索的资源标识");
+      return;
+    }
+    const scope = searchScope(selectedProfile.adapter, selectedAddress);
+    setBusy(true);
+    setMessage(undefined);
+    try {
+      const page = await runSearch(selectedSession.id, scope, query);
+      setRows(searchPageRows(page.items, page.scope, query, page.nextCursor));
+      setActiveSearch({ scope: page.scope, query, scanned: page.scanned, exhaustive: page.exhaustive });
+      setFilter("");
+      setMessage(
+        `${page.items.length} 个匹配项 · 本次检查 ${page.scanned} 个标识${page.exhaustive ? " · 已到当前范围末尾" : " · 可继续加载"}`,
+      );
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const locateResource = async () => {
+    if (!selectedSession || !selectedProfile || busy) return;
+    let address: ResourceAddress;
+    try {
+      address = locateAddress(selectedProfile.adapter, resourceQuery);
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+      return;
+    }
+    if (document && draftValue !== document.value.content
+      && !globalThis.confirm("定位其他资源会丢弃当前未保存的编辑，是否继续？")) {
+      return;
+    }
+    if (!document || !sameAddress(document.address, address)) await stopActiveWatch();
+    setBusy(true);
+    setMessage(undefined);
+    setSelectedAddress(address);
+    try {
+      showDocument(await runRead(selectedSession.id, address));
+      setMessage("已精确定位并读取资源");
+    } catch (reason) {
+      showDocument(undefined);
+      setMessage(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exitSearch = async () => {
     if (!selectedSession || busy) return;
     setBusy(true);
     setMessage(undefined);
@@ -562,6 +721,27 @@ export function App() {
     if (!selectedSession || busy) return;
     setBusy(true);
     try {
+      if (row.search) {
+        const page = await runSearch(
+          selectedSession.id,
+          row.search.scope,
+          row.search.query,
+          row.cursor,
+        );
+        setRows((current) => {
+          const next = [...current];
+          next.splice(
+            index,
+            1,
+            ...searchPageRows(page.items, page.scope, row.search!.query, page.nextCursor),
+          );
+          return next;
+        });
+        setActiveSearch((current) => current
+          ? { ...current, scanned: current.scanned + page.scanned, exhaustive: page.exhaustive }
+          : current);
+        return;
+      }
       const page = await runList(selectedSession.id, row.parent, row.cursor);
       setRows((current) => {
         const next = [...current];
@@ -719,6 +899,91 @@ export function App() {
     }
   };
 
+  const openExportDialog = () => {
+    if (!document || busy) return;
+    setExportIncludeValue(false);
+    setExportDialogOpen(true);
+  };
+
+  const executeExport = async () => {
+    if (!selectedSession || !document || busy) return;
+    setBusy(true);
+    setMessage(undefined);
+    try {
+      const receipt = await exportResource(
+        selectedSession.id,
+        document.address,
+        exportIncludeValue,
+      );
+      if (!receipt) {
+        setMessage("已取消导出");
+        return;
+      }
+      setExportDialogOpen(false);
+      setMessage(
+        `已导出 ${receipt.fileName} · ${receipt.includeValue ? "包含 value，请按敏感文件保管" : "metadata-only，不包含 value"}`,
+      );
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chooseImportFile = async () => {
+    if (!selectedSession || busy) return;
+    setBusy(true);
+    setMessage(undefined);
+    try {
+      const preview = await chooseImport(selectedSession.id);
+      if (!preview) {
+        setMessage("已取消选择导入文件");
+        return;
+      }
+      setImportPreview(preview);
+      setImportConfirmationText("");
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const executeImport = async () => {
+    if (!selectedSession || !importPreview || busy) return;
+    const preview = importPreview;
+    setBusy(true);
+    setMessage(undefined);
+    const operationId = startOperation();
+    try {
+      const result = await applyImport(
+        selectedSession.id,
+        preview.planId,
+        operationId,
+      );
+      setImportPreview(undefined);
+      let refreshSuffix = "";
+      try {
+        await reloadRoot(selectedSession.id);
+      } catch (reason) {
+        refreshSuffix = `；资源树刷新失败：${errorMessage(reason)}`;
+      }
+      if (result.failed) {
+        setMessage(
+          `已写入 ${result.applied.length} 项；“${result.failed.item.name}”失败：${result.failed.error.message}；另有 ${result.remaining} 项未执行${refreshSuffix}`,
+        );
+      } else {
+        setMessage(`导入完成：已写入 ${result.applied.length} 项，${preview.skipped} 项因不含 value 跳过；脱敏审计已记录${refreshSuffix}`);
+      }
+    } catch (reason) {
+      setImportPreview(undefined);
+      setMessage(errorMessage(reason));
+    } finally {
+      finishOperation(operationId);
+      setBusy(false);
+    }
+  };
+
   const disconnect = async () => {
     if (!selectedSession) return;
     await stopActiveWatch();
@@ -733,6 +998,9 @@ export function App() {
       return next;
     });
     setRows([]);
+    setActiveSearch(undefined);
+    setExportDialogOpen(false);
+    setImportPreview(undefined);
     showDocument(undefined);
     setPendingMutation(undefined);
     setCreateDialogOpen(false);
@@ -789,6 +1057,9 @@ export function App() {
       if (selectedId === form.id) {
         setSelectedId(undefined);
         setRows([]);
+        setActiveSearch(undefined);
+        setExportDialogOpen(false);
+        setImportPreview(undefined);
         showDocument(undefined);
         setSelectedAddress(undefined);
       }
@@ -873,16 +1144,40 @@ export function App() {
         <section className="tree">
           <div className="tree-header">
             <b>{selectedProfile?.name ?? "资源"}</b>
+            <button className="icon-button import-resource" disabled={!selectedSession || busy} onClick={() => void chooseImportFile()} title="从 Atlas JSON 导入">⇧</button>
             <button className="icon-button create-resource" disabled={!selectedSession || busy} onClick={openCreateResource} title="新建资源">＋</button>
             <button className="icon-button" disabled={!selectedSession || busy} onClick={() => void refreshRoot()} title="刷新">↻</button>
             <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选当前已加载资源…" />
+            <div className="resource-query">
+              <input
+                value={resourceQuery}
+                disabled={!selectedSession || busy}
+                onChange={(event) => setResourceQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void searchCurrentScope();
+                }}
+                placeholder={selectedProfile?.adapter === "nacos"
+                  ? "搜索 dataId；定位请填 GROUP / dataId"
+                  : selectedProfile?.adapter === "zookeeper"
+                    ? "搜索节点名；定位请填 /绝对路径"
+                    : "搜索 key；定位可填 key 或 base64:…"}
+              />
+              <button className="button" disabled={!selectedSession || busy} onClick={() => void searchCurrentScope()}>搜索</button>
+              <button className="button" disabled={!selectedSession || busy} onClick={() => void locateResource()}>定位</button>
+            </div>
+            {activeSearch && (
+              <div className="search-state">
+                <span>“{activeSearch.query}” · 已检查 {activeSearch.scanned} 个标识{activeSearch.exhaustive ? " · 已完成" : ""}</span>
+                <button disabled={busy} onClick={() => void exitSearch()}>返回资源树</button>
+              </div>
+            )}
           </div>
 
           {!selectedSession && (
             <div className="empty"><span className="empty-icon">◇</span><b>选择并打开连接</b><span>资源会按需加载，不会扫描整个集群。</span></div>
           )}
           {selectedSession && rows.length === 0 && !busy && (
-            <div className="empty"><span className="empty-icon">∅</span><b>当前范围没有资源</b><span>可以刷新，或检查所选 namespace 和权限。</span></div>
+            <div className="empty"><span className="empty-icon">∅</span><b>{activeSearch ? "没有匹配的资源" : "当前范围没有资源"}</b><span>{activeSearch ? "可调整标识关键词，搜索不会读取资源值。" : "可以刷新，或检查所选 namespace 和权限。"}</span></div>
           )}
           {visibleRows.map((row) => {
             const actualIndex = rows.indexOf(row);
@@ -923,6 +1218,7 @@ export function App() {
               <div className="detail-title">
                 <div><span className="eyebrow">RESOURCE</span><h1>{document.name}</h1></div>
                 <div className="actions">
+                  <button className="button" disabled={busy} onClick={openExportDialog}>导出</button>
                   <button className="button danger" disabled={busy || !document.version} onClick={prepareDelete}>删除</button>
                   <button className="button primary" disabled={busy || !document.version || draftValue === document.value.content} onClick={prepareUpdate}>保存变更</button>
                 </div>
@@ -1015,6 +1311,30 @@ export function App() {
           onConfirmationTextChange={setConfirmationText}
           onCancel={() => setPendingMutation(undefined)}
           onConfirm={() => void executeMutation()}
+          onCancelOperation={() => void cancelActiveOperation()}
+        />
+      )}
+
+      {exportDialogOpen && document && (
+        <ExportDialog
+          document={document}
+          includeValue={exportIncludeValue}
+          busy={busy}
+          onIncludeValueChange={setExportIncludeValue}
+          onCancel={() => setExportDialogOpen(false)}
+          onExport={() => void executeExport()}
+        />
+      )}
+
+      {importPreview && selectedProfile && (
+        <ImportPreviewDialog
+          preview={importPreview}
+          profile={selectedProfile}
+          confirmationText={importConfirmationText}
+          busy={busy}
+          onConfirmationTextChange={setImportConfirmationText}
+          onCancel={() => setImportPreview(undefined)}
+          onApply={() => void executeImport()}
           onCancelOperation={() => void cancelActiveOperation()}
         />
       )}

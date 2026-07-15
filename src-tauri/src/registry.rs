@@ -39,6 +39,7 @@ pub enum AdapterStatus {
 pub enum Capability {
     Probe,
     Browse,
+    Search,
     Read,
     Watch,
     Create,
@@ -249,6 +250,41 @@ pub struct ResourcePageRequest {
     pub limit: Option<usize>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceSearchRequest {
+    pub scope: ResourceAddress,
+    pub query: String,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+impl ResourceSearchRequest {
+    fn validate(&mut self) -> Result<(), RegistryError> {
+        self.query = self.query.trim().to_owned();
+        if self.query.is_empty() {
+            return Err(RegistryError::validation("search query cannot be blank"));
+        }
+        if self.query.len() > 256 {
+            return Err(RegistryError::validation(
+                "search query cannot exceed 256 bytes",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceSearchPage {
+    pub scope: ResourceAddress,
+    pub items: Vec<ResourceNode>,
+    pub next_cursor: Option<String>,
+    /// Number of identifiers examined by this bounded request. Values are never read by search.
+    pub scanned: usize,
+    pub exhaustive: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
 #[serde(transparent)]
 pub struct OperationId(String);
@@ -433,7 +469,7 @@ pub struct MutationValue {
 }
 
 impl MutationValue {
-    fn decoded(&self) -> Result<Vec<u8>, RegistryError> {
+    pub(crate) fn decoded(&self) -> Result<Vec<u8>, RegistryError> {
         let bytes = match self.encoding {
             ValueEncoding::Utf8 => self.content.as_bytes().to_vec(),
             ValueEncoding::Base64 => STANDARD
@@ -629,7 +665,7 @@ impl EncodedValue {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceSnapshot {
     pub version: Option<String>,
@@ -877,6 +913,7 @@ impl RegistryCatalog {
                 capabilities: vec![
                     Capability::Probe,
                     Capability::Browse,
+                    Capability::Search,
                     Capability::Read,
                     Capability::Watch,
                     Capability::Create,
@@ -902,6 +939,13 @@ pub struct RegistryService {
 }
 
 impl RegistryService {
+    pub(crate) async fn connection_adapter(
+        &self,
+        connection_id: &str,
+    ) -> Result<AdapterId, RegistryError> {
+        Ok(self.session(connection_id).await?.adapter_id())
+    }
+
     pub async fn probe_cancellable(
         &self,
         operation_id: OperationId,
@@ -1043,6 +1087,30 @@ impl RegistryService {
         let service = self.clone();
         self.run_operation(operation_id, async move {
             service.read(&connection_id, address).await
+        })
+        .await
+    }
+
+    pub async fn search(
+        &self,
+        connection_id: &str,
+        mut request: ResourceSearchRequest,
+    ) -> Result<ResourceSearchPage, RegistryError> {
+        request.validate()?;
+        let limit = request.limit.unwrap_or(100).clamp(1, 200);
+        let session = self.session(connection_id).await?;
+        session.search(request, limit).await
+    }
+
+    pub async fn search_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        request: ResourceSearchRequest,
+    ) -> Result<ResourceSearchPage, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            service.search(&connection_id, request).await
         })
         .await
     }
@@ -1313,9 +1381,33 @@ impl RegistryService {
 mod tests {
     use super::{
         MutationPhase, OperationId, RegistryError, RegistryErrorCode, RegistryService,
-        ResourceAddress, SubscriptionId, WatchChangeKind, WatchEvent, WatchRequest,
-        WatchStatusState,
+        ResourceAddress, ResourceSearchRequest, SubscriptionId, WatchChangeKind, WatchEvent,
+        WatchRequest, WatchStatusState,
     };
+
+    #[test]
+    fn search_request_trims_queries_and_rejects_unbounded_input() {
+        let mut request = ResourceSearchRequest {
+            scope: ResourceAddress::Root,
+            query: "  application  ".to_owned(),
+            cursor: None,
+            limit: None,
+        };
+        request.validate().unwrap();
+        assert_eq!(request.query, "application");
+
+        request.query = "   ".to_owned();
+        assert_eq!(
+            request.validate().unwrap_err().code,
+            RegistryErrorCode::Validation
+        );
+
+        request.query = "x".repeat(257);
+        assert_eq!(
+            request.validate().unwrap_err().code,
+            RegistryErrorCode::Validation
+        );
+    }
 
     #[tokio::test]
     async fn cancellation_interrupts_an_operation_and_removes_its_registration() {

@@ -13,7 +13,7 @@ export type AuthenticationMode = "none" | "usernamePassword" | "digest" | "custo
 export type AdapterDescriptor = {
   id: AdapterId;
   status: "available";
-  capabilities: Array<"probe" | "browse" | "read" | "watch" | "create" | "update" | "delete">;
+  capabilities: Array<"probe" | "browse" | "search" | "read" | "watch" | "create" | "update" | "delete">;
 };
 
 export type ConnectionProfile = {
@@ -87,6 +87,14 @@ export type ResourcePage = {
   nextCursor?: string;
 };
 
+export type ResourceSearchPage = {
+  scope: ResourceAddress;
+  items: ResourceNode[];
+  nextCursor?: string;
+  scanned: number;
+  exhaustive: boolean;
+};
+
 export type ResourceDocument = {
   address: ResourceAddress;
   name: string;
@@ -144,6 +152,44 @@ export type MutationResult = {
   previous?: ResourceSnapshot;
   current?: ResourceSnapshot;
   consistency: "atomic" | "checkedBeforeMutation";
+};
+
+export type ExportReceipt = {
+  fileName: string;
+  includeValue: boolean;
+  snapshot: ResourceSnapshot;
+};
+
+export type ImportAction = "create" | "update" | "skippedNoValue";
+
+export type ImportPreviewItem = {
+  address: ResourceAddress;
+  name: string;
+  action: ImportAction;
+  sizeBytes: number;
+  sha256: string;
+};
+
+export type ImportPreview = {
+  planId: string;
+  fileName: string;
+  resources: ImportPreviewItem[];
+  creates: number;
+  updates: number;
+  skipped: number;
+  expiresInSeconds: number;
+};
+
+export type ImportApplyResult = {
+  applied: Array<{
+    item: ImportPreviewItem;
+    consistency: "atomic" | "checkedBeforeMutation";
+  }>;
+  failed?: {
+    item: ImportPreviewItem;
+    error: RegistryError;
+  };
+  remaining: number;
 };
 
 export type WatchStatusState =
@@ -251,6 +297,22 @@ export function readResource(
   });
 }
 
+export function searchResources(
+  connectionId: string,
+  scope: ResourceAddress,
+  query: string,
+  operationId: string,
+  cursor?: string,
+) {
+  return invoke<ResourceSearchPage>("search_resources", {
+    request: {
+      connectionId,
+      operationId,
+      search: { scope, query, cursor, limit: 100 },
+    },
+  });
+}
+
 export function mutateResource(
   connectionId: string,
   mutation: ResourceMutation,
@@ -258,6 +320,32 @@ export function mutateResource(
 ) {
   return invoke<MutationResult>("mutate_resource", {
     request: { connectionId, mutation, operationId },
+  });
+}
+
+export function exportResource(
+  connectionId: string,
+  address: ResourceAddress,
+  includeValue: boolean,
+) {
+  return invoke<ExportReceipt | null>("export_resource", {
+    request: { connectionId, address, includeValue },
+  });
+}
+
+export function chooseImport(connectionId: string) {
+  return invoke<ImportPreview | null>("choose_import", {
+    request: { connectionId },
+  });
+}
+
+export function applyImport(
+  connectionId: string,
+  planId: string,
+  operationId: string,
+) {
+  return invoke<ImportApplyResult>("apply_import", {
+    request: { connectionId, planId, operationId, confirmed: true },
   });
 }
 

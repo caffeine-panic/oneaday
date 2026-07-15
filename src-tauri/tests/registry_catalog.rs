@@ -22,6 +22,7 @@ fn catalog_reports_read_watch_and_safe_mutation_capabilities_for_each_native_ada
                 == vec![
                     Capability::Probe,
                     Capability::Browse,
+                    Capability::Search,
                     Capability::Read,
                     Capability::Watch,
                     Capability::Create,

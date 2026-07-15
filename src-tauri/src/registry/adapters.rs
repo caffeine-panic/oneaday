@@ -20,7 +20,7 @@ use crate::credentials::ConnectionSecret;
 use super::{
     AdapterId, AuthenticationMode, ConnectionProfile, EncodedValue, MutationPhase, MutationResult,
     NacosApiVersion, RegistryError, RegistryErrorCode, ResourceAddress, ResourceDocument,
-    ResourceMutation, ResourceNode, ResourcePage,
+    ResourceMutation, ResourceNode, ResourcePage, ResourceSearchPage, ResourceSearchRequest,
     mutations::{mutate_etcd, mutate_nacos, mutate_zookeeper},
 };
 use nacos_auth::NacosRequestAuth;
@@ -54,6 +54,14 @@ impl NacosSession {
 }
 
 impl RegistrySession {
+    pub(super) fn adapter_id(&self) -> AdapterId {
+        match self {
+            Self::Etcd(_) => AdapterId::Etcd,
+            Self::Zookeeper(_) => AdapterId::Zookeeper,
+            Self::Nacos(_) => AdapterId::Nacos,
+        }
+    }
+
     pub(super) async fn connect(
         profile: &ConnectionProfile,
         secret: Option<ConnectionSecret>,
@@ -112,6 +120,22 @@ impl RegistrySession {
         })
         .await
         .map_err(|_| RegistryError::timeout("resource read"))?
+    }
+
+    pub(super) async fn search(
+        &self,
+        request: ResourceSearchRequest,
+        limit: usize,
+    ) -> Result<ResourceSearchPage, RegistryError> {
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Etcd(client) => search_etcd(client.as_ref().clone(), request, limit).await,
+                Self::Zookeeper(client) => search_zookeeper(client, request, limit).await,
+                Self::Nacos(session) => search_nacos(session, request, limit).await,
+            }
+        })
+        .await
+        .map_err(|_| RegistryError::timeout("resource search"))?
     }
 
     pub(super) async fn mutate(
@@ -412,6 +436,74 @@ async fn list_etcd(
     })
 }
 
+async fn search_etcd(
+    mut client: etcd_client::Client,
+    request: ResourceSearchRequest,
+    limit: usize,
+) -> Result<ResourceSearchPage, RegistryError> {
+    let parent_prefix = match &request.scope {
+        ResourceAddress::Root => Vec::new(),
+        ResourceAddress::EtcdPrefix { prefix_base64 } => {
+            decode_base64(prefix_base64, "etcd search prefix")?
+        }
+        _ => return Err(adapter_mismatch(AdapterId::Etcd, &request.scope)),
+    };
+    let start = match &request.cursor {
+        Some(cursor) => decode_base64(cursor, "etcd search cursor")?,
+        None if parent_prefix.is_empty() => vec![0],
+        None => parent_prefix.clone(),
+    };
+    let scan_limit = (limit.saturating_mul(64)).clamp(256, 4096) as i64;
+    let mut options = GetOptions::new()
+        .with_keys_only()
+        .with_limit(scan_limit)
+        .with_sort(SortTarget::Key, SortOrder::Ascend);
+    options = if parent_prefix.is_empty() {
+        options.with_from_key()
+    } else {
+        options.with_range(prefix_end(&parent_prefix))
+    };
+    let response = client
+        .get(start, Some(options))
+        .await
+        .map_err(|error| RegistryError::network(format!("etcd search failed: {error}")))?;
+    let query = request.query.to_lowercase();
+    let mut items = Vec::new();
+    let mut scanned = 0usize;
+    let mut last_scanned = None;
+    for key_value in response.kvs() {
+        scanned += 1;
+        let key = key_value.key();
+        last_scanned = Some(key.to_vec());
+        let name = display_bytes(key);
+        if name.to_lowercase().contains(&query) {
+            items.push(ResourceNode {
+                address: ResourceAddress::Etcd {
+                    key_base64: STANDARD.encode(key),
+                },
+                name,
+                readable: true,
+                has_children: Some(false),
+            });
+            if items.len() == limit {
+                break;
+            }
+        }
+    }
+    let has_more_in_response = scanned < response.kvs().len();
+    let next_cursor = (response.more() || has_more_in_response)
+        .then(|| last_scanned.map(|key| STANDARD.encode(etcd_cursor_after(&key, false))))
+        .flatten();
+
+    Ok(ResourceSearchPage {
+        scope: request.scope,
+        items,
+        exhaustive: next_cursor.is_none(),
+        next_cursor,
+        scanned,
+    })
+}
+
 async fn read_etcd(
     mut client: etcd_client::Client,
     address: ResourceAddress,
@@ -489,6 +581,78 @@ async fn list_zookeeper(
         parent,
         items,
         next_cursor,
+    })
+}
+
+struct ZookeeperSearchWindow {
+    items: Vec<String>,
+    scanned: usize,
+    next_offset: Option<usize>,
+}
+
+fn search_zookeeper_children(
+    mut children: Vec<String>,
+    _path: &str,
+    query: &str,
+    offset: usize,
+    limit: usize,
+) -> ZookeeperSearchWindow {
+    children.sort();
+    let query = query.to_lowercase();
+    let mut items = Vec::new();
+    let mut scanned = 0usize;
+    let mut next_offset = None;
+    for (index, name) in children.iter().enumerate().skip(offset) {
+        scanned += 1;
+        if name.to_lowercase().contains(&query) {
+            items.push(name.clone());
+            if items.len() == limit {
+                next_offset = (index + 1 < children.len()).then_some(index + 1);
+                break;
+            }
+        }
+    }
+    ZookeeperSearchWindow {
+        items,
+        scanned,
+        next_offset,
+    }
+}
+
+async fn search_zookeeper(
+    client: &zookeeper_client::Client,
+    request: ResourceSearchRequest,
+    limit: usize,
+) -> Result<ResourceSearchPage, RegistryError> {
+    let path = match &request.scope {
+        ResourceAddress::Root => "/",
+        ResourceAddress::Zookeeper { path } => path,
+        _ => return Err(adapter_mismatch(AdapterId::Zookeeper, &request.scope)),
+    };
+    let offset = parse_page_offset(request.cursor.clone())?;
+    let children = client
+        .list_children(path)
+        .await
+        .map_err(|error| RegistryError::network(format!("ZooKeeper search failed: {error}")))?;
+    let window = search_zookeeper_children(children, path, &request.query, offset, limit);
+    let items = window
+        .items
+        .into_iter()
+        .map(|name| ResourceNode {
+            address: ResourceAddress::Zookeeper {
+                path: join_zookeeper_path(path, &name),
+            },
+            name,
+            readable: true,
+            has_children: None,
+        })
+        .collect();
+    Ok(ResourceSearchPage {
+        scope: request.scope,
+        items,
+        next_cursor: window.next_offset.map(|offset| offset.to_string()),
+        scanned: window.scanned,
+        exhaustive: window.next_offset.is_none(),
     })
 }
 
@@ -572,8 +736,8 @@ async fn list_nacos(
     }
     let page_number = parse_page_number(cursor)?;
     let page = match session.api_version {
-        NacosApiVersion::V2 => fetch_nacos_v2_page(session, page_number, limit).await?,
-        NacosApiVersion::V3 => fetch_nacos_v3_page(session, page_number, limit).await?,
+        NacosApiVersion::V2 => fetch_nacos_v2_page(session, page_number, limit, "").await?,
+        NacosApiVersion::V3 => fetch_nacos_v3_page(session, page_number, limit, "").await?,
     };
     let next_cursor =
         (page.page_number < page.pages_available).then(|| (page.page_number + 1).to_string());
@@ -602,10 +766,59 @@ async fn list_nacos(
     })
 }
 
+async fn search_nacos(
+    session: &NacosSession,
+    request: ResourceSearchRequest,
+    limit: usize,
+) -> Result<ResourceSearchPage, RegistryError> {
+    if request.scope != ResourceAddress::Root {
+        return Err(RegistryError::unsupported(
+            "Nacos search uses the flat configuration scope",
+        ));
+    }
+    let page_number = parse_page_number(request.cursor.clone())?;
+    let page = match session.api_version {
+        NacosApiVersion::V2 => {
+            fetch_nacos_v2_page(session, page_number, limit, &request.query).await?
+        }
+        NacosApiVersion::V3 => {
+            fetch_nacos_v3_page(session, page_number, limit, &request.query).await?
+        }
+    };
+    let scanned = page.page_items.len();
+    let next_cursor =
+        (page.page_number < page.pages_available).then(|| (page.page_number + 1).to_string());
+    let items = page
+        .page_items
+        .into_iter()
+        .map(|item| {
+            let group = item.group_name;
+            let data_id = item.data_id;
+            ResourceNode {
+                address: ResourceAddress::NacosConfig {
+                    group: group.clone(),
+                    data_id: data_id.clone(),
+                },
+                name: format!("{group} / {data_id}"),
+                readable: true,
+                has_children: Some(false),
+            }
+        })
+        .collect();
+    Ok(ResourceSearchPage {
+        scope: request.scope,
+        items,
+        exhaustive: next_cursor.is_none(),
+        next_cursor,
+        scanned,
+    })
+}
+
 async fn fetch_nacos_v2_page(
     session: &NacosSession,
     page_number: usize,
     limit: usize,
+    data_id: &str,
 ) -> Result<NacosConfigPage, RegistryError> {
     let url = format!(
         "{}/nacos/v1/cs/configs",
@@ -616,7 +829,7 @@ async fn fetch_nacos_v2_page(
         .apply(session.http.get(url))
         .query(&[
             ("search", "blur".to_owned()),
-            ("dataId", String::new()),
+            ("dataId", data_id.to_owned()),
             ("group", String::new()),
             (
                 "tenant",
@@ -644,6 +857,7 @@ async fn fetch_nacos_v3_page(
     session: &NacosSession,
     page_number: usize,
     limit: usize,
+    data_id: &str,
 ) -> Result<NacosConfigPage, RegistryError> {
     let url = format!(
         "{}/nacos/v3/admin/cs/config/list",
@@ -659,7 +873,7 @@ async fn fetch_nacos_v3_page(
                 "namespaceId",
                 public_namespace_for_api(&session.namespace).to_owned(),
             ),
-            ("dataId", String::new()),
+            ("dataId", data_id.to_owned()),
             ("groupName", String::new()),
             ("configDetail", String::new()),
             ("search", "blur".to_owned()),
@@ -873,7 +1087,9 @@ fn adapter_mismatch(adapter: AdapterId, address: &ResourceAddress) -> RegistryEr
 
 #[cfg(test)]
 mod tests {
-    use super::{etcd_cursor_after, etcd_immediate_child, nacos_http_error};
+    use super::{
+        etcd_cursor_after, etcd_immediate_child, nacos_http_error, search_zookeeper_children,
+    };
 
     #[test]
     fn etcd_cursor_keeps_exact_keys_and_folder_prefixes_in_separate_ranges() {
@@ -887,6 +1103,27 @@ mod tests {
         assert!(etcd_cursor_after(&exact.0, exact.2) < dotted.0);
         assert!(etcd_cursor_after(&dotted.0, dotted.2) < b"a/x".to_vec());
         assert!(etcd_cursor_after(&nested.0, nested.2) > b"a/x".to_vec());
+    }
+
+    #[test]
+    fn zookeeper_search_is_identifier_only_bounded_and_cursor_driven() {
+        let children = vec![
+            "alpha-service".to_owned(),
+            "beta".to_owned(),
+            "config-service".to_owned(),
+            "database".to_owned(),
+            "service-z".to_owned(),
+        ];
+
+        let first = search_zookeeper_children(children.clone(), "/services", "SERVICE", 0, 2);
+        assert_eq!(first.items, vec!["alpha-service", "config-service"]);
+        assert_eq!(first.scanned, 3);
+        assert_eq!(first.next_offset, Some(3));
+
+        let second = search_zookeeper_children(children, "/services", "service", 3, 2);
+        assert_eq!(second.items, vec!["service-z"]);
+        assert_eq!(second.scanned, 2);
+        assert_eq!(second.next_offset, None);
     }
 
     #[tokio::test]
