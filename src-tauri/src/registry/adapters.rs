@@ -45,6 +45,14 @@ pub(super) struct NacosSession {
     _credential: Option<Arc<ConnectionSecret>>,
 }
 
+impl NacosSession {
+    pub(super) async fn probe_remote(&self) -> Result<(), RegistryError> {
+        list_nacos(self, ResourceAddress::Root, None, 1)
+            .await
+            .map(|_| ())
+    }
+}
+
 impl RegistrySession {
     pub(super) async fn connect(
         profile: &ConnectionProfile,

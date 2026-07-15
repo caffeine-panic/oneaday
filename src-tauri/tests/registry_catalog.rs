@@ -6,7 +6,7 @@ use atlas_registry_lib::registry::{
 };
 
 #[test]
-fn catalog_reports_read_and_safe_mutation_capabilities_for_each_native_adapter() {
+fn catalog_reports_read_watch_and_safe_mutation_capabilities_for_each_native_adapter() {
     let descriptors = RegistryCatalog.descriptors();
 
     assert_eq!(
@@ -23,6 +23,7 @@ fn catalog_reports_read_and_safe_mutation_capabilities_for_each_native_adapter()
                     Capability::Probe,
                     Capability::Browse,
                     Capability::Read,
+                    Capability::Watch,
                     Capability::Create,
                     Capability::Update,
                     Capability::Delete,

@@ -6,10 +6,11 @@ pub mod registry;
 use registry::{
     AdapterDescriptor, ConnectionProbe, ConnectionProfile, ConnectionSession, MutationPhase,
     MutationResult, OperationId, RegistryCatalog, RegistryError, RegistryService, ResourceAddress,
-    ResourceDocument, ResourceMutation, ResourcePage, ResourcePageRequest,
+    ResourceDocument, ResourceMutation, ResourcePage, ResourcePageRequest, SubscriptionId,
+    WatchEvent, WatchRequest,
 };
 use serde::Deserialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, ipc::Channel};
 
 use connections::ConnectionStore;
 use credentials::{CredentialUpdate, CredentialVault, TransientCredential};
@@ -255,6 +256,50 @@ async fn cancel_operation(
     Ok(service.cancel(&OperationId::new(operation_id)?).await)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartWatchCommandRequest {
+    connection_id: String,
+    subscription_id: String,
+    watch: WatchRequest,
+}
+
+#[tauri::command]
+async fn start_watch(
+    service: State<'_, RegistryService>,
+    request: StartWatchCommandRequest,
+    on_event: Channel<WatchEvent>,
+) -> Result<(), RegistryError> {
+    let subscription_id = SubscriptionId::new(request.subscription_id)?;
+    let mut events = service
+        .start_watch(
+            subscription_id.clone(),
+            request.connection_id,
+            request.watch,
+        )
+        .await?;
+    let watch_service = service.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if on_event.send(event).is_err() {
+                watch_service.stop_watch(&subscription_id).await;
+                break;
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_watch(
+    service: State<'_, RegistryService>,
+    subscription_id: String,
+) -> Result<bool, RegistryError> {
+    Ok(service
+        .stop_watch(&SubscriptionId::new(subscription_id)?)
+        .await)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configured_builder(tauri::Builder::default())
@@ -278,7 +323,9 @@ fn configured_builder<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::B
             list_resources,
             read_resource,
             mutate_resource,
-            cancel_operation
+            cancel_operation,
+            start_watch,
+            stop_watch
         ])
 }
 
@@ -309,8 +356,28 @@ mod command_tests {
                 .as_array()
                 .expect("adapter array")
                 .iter()
-                .all(|adapter| adapter["capabilities"].as_array().map(Vec::len) == Some(6))
+                .all(|adapter| adapter["capabilities"].as_array().map(Vec::len) == Some(7))
         );
+
+        let watch_error = test::get_ipc_response(
+            &webview,
+            request(
+                "start_watch",
+                json!({
+                    "request": {
+                        "connectionId": "missing",
+                        "subscriptionId": "invalid-root-watch",
+                        "watch": {
+                            "address": { "type": "root" },
+                            "startVersion": null
+                        }
+                    },
+                    "onEvent": "__CHANNEL__:42"
+                }),
+            ),
+        )
+        .expect_err("root watch should be rejected by the public command");
+        assert_eq!(watch_error["code"], "validation");
 
         let error = test::get_ipc_response(
             &webview,

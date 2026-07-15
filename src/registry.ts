@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 export type AdapterId = "etcd" | "zookeeper" | "nacos";
 export type NacosApiVersion = "v2" | "v3";
@@ -13,7 +13,7 @@ export type AuthenticationMode = "none" | "usernamePassword" | "digest" | "custo
 export type AdapterDescriptor = {
   id: AdapterId;
   status: "available";
-  capabilities: Array<"probe" | "browse" | "read" | "create" | "update" | "delete">;
+  capabilities: Array<"probe" | "browse" | "read" | "watch" | "create" | "update" | "delete">;
 };
 
 export type ConnectionProfile = {
@@ -146,6 +146,37 @@ export type MutationResult = {
   consistency: "atomic" | "checkedBeforeMutation";
 };
 
+export type WatchStatusState =
+  | "starting"
+  | "live"
+  | "reconnecting"
+  | "compacted"
+  | "sessionExpired"
+  | "stopped"
+  | "failed";
+
+export type WatchEvent =
+  | {
+      kind: "status";
+      subscriptionId: string;
+      state: WatchStatusState;
+      message?: string;
+      retryInMs?: number;
+    }
+  | {
+      kind: "change";
+      subscriptionId: string;
+      change: "created" | "updated" | "deleted" | "childrenChanged";
+      address: ResourceAddress;
+      version?: string;
+    };
+
+export type WatchHandle = {
+  subscriptionId: string;
+  // Retaining the channel keeps the JavaScript callback alive for the subscription lifetime.
+  channel: Channel<WatchEvent>;
+};
+
 export const ROOT_ADDRESS: ResourceAddress = { type: "root" };
 
 export function registryCapabilities() {
@@ -234,6 +265,29 @@ export function cancelOperation(operationId: string) {
   return invoke<boolean>("cancel_operation", { operationId });
 }
 
+export async function startWatch(
+  connectionId: string,
+  subscriptionId: string,
+  address: ResourceAddress,
+  onEvent: (event: WatchEvent) => void,
+  startVersion?: string,
+): Promise<WatchHandle> {
+  const channel = new Channel<WatchEvent>(onEvent);
+  await invoke<void>("start_watch", {
+    request: {
+      connectionId,
+      subscriptionId,
+      watch: { address, startVersion },
+    },
+    onEvent: channel,
+  });
+  return { subscriptionId, channel };
+}
+
+export function stopWatch(subscriptionId: string) {
+  return invoke<boolean>("stop_watch", { subscriptionId });
+}
+
 export function errorMessage(reason: unknown): string {
   if (typeof reason === "string") return reason;
   if (reason && typeof reason === "object" && "message" in reason) {
@@ -250,6 +304,10 @@ export function isOutcomeUnknown(reason: unknown): boolean {
   return Boolean(
     reason && typeof reason === "object" && "code" in reason && reason.code === "outcomeUnknown",
   );
+}
+
+export function isNotFound(reason: unknown): boolean {
+  return Boolean(reason && typeof reason === "object" && "code" in reason && reason.code === "notFound");
 }
 
 export function newConnectionId(): string {

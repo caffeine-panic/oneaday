@@ -2,8 +2,8 @@ use atlas_registry_lib::{
     credentials::ConnectionSecret,
     registry::{
         AdapterId, AuthenticationMode, ConnectionAuth, ConnectionProfile, MutationValue,
-        NacosApiVersion, RegistryService, ResourceAddress, ResourceMutation, TlsProfile,
-        ValueEncoding,
+        NacosApiVersion, RegistryService, ResourceAddress, ResourceMutation, SubscriptionId,
+        TlsProfile, ValueEncoding, WatchEvent, WatchRequest, WatchStatusState,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -240,6 +240,22 @@ async fn assert_create_update_delete(
         .and_then(|snapshot| snapshot.version)
         .expect("create should return a version");
 
+    let subscription_id = SubscriptionId::new(format!("live-watch-{}", unique_suffix())).unwrap();
+    let mut watch_events = service
+        .start_watch(
+            subscription_id.clone(),
+            connection_id.to_owned(),
+            WatchRequest {
+                address: address.clone(),
+                start_version: matches!(&address, ResourceAddress::Etcd { .. })
+                    .then(|| created_version.clone()),
+            },
+        )
+        .await
+        .expect("live resource watch should start");
+    wait_for_live_watch(&mut watch_events).await;
+    drain_initial_watch_events(&mut watch_events).await;
+
     let stale_version = match &address {
         ResourceAddress::NacosConfig { .. } => "stale-md5".to_owned(),
         _ => (created_version
@@ -277,6 +293,7 @@ async fn assert_create_update_delete(
         )
         .await
         .expect("test resource should be conditionally updated");
+    wait_for_change(&mut watch_events).await;
     let updated_version = updated
         .current
         .and_then(|snapshot| snapshot.version)
@@ -297,6 +314,7 @@ async fn assert_create_update_delete(
         )
         .await
         .expect("test resource should be conditionally deleted");
+    assert!(service.stop_watch(&subscription_id).await);
     let missing = service
         .read(connection_id, address)
         .await
@@ -305,4 +323,58 @@ async fn assert_create_update_delete(
         missing.code,
         atlas_registry_lib::registry::RegistryErrorCode::NotFound
     );
+}
+
+async fn wait_for_live_watch(events: &mut tokio::sync::mpsc::Receiver<WatchEvent>) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match events
+                .recv()
+                .await
+                .expect("watch event channel should remain open")
+            {
+                WatchEvent::Status {
+                    state: WatchStatusState::Live,
+                    ..
+                } => return,
+                WatchEvent::Status {
+                    state: WatchStatusState::Failed,
+                    message,
+                    ..
+                } => panic!("live watch failed: {message:?}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("watch should become live within 10 seconds");
+}
+
+async fn drain_initial_watch_events(events: &mut tokio::sync::mpsc::Receiver<WatchEvent>) {
+    while matches!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), events.recv()).await,
+        Ok(Some(_))
+    ) {}
+}
+
+async fn wait_for_change(events: &mut tokio::sync::mpsc::Receiver<WatchEvent>) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match events
+                .recv()
+                .await
+                .expect("watch event channel should remain open")
+            {
+                WatchEvent::Change { .. } => return,
+                WatchEvent::Status {
+                    state: WatchStatusState::Failed,
+                    message,
+                    ..
+                } => panic!("live watch failed: {message:?}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("updated resource should emit a watch event within 10 seconds");
 }

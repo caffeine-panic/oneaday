@@ -57,7 +57,7 @@ ATLAS_TEST_NACOS_DATA_ID=atlas-fixture.yaml
 
 ### 显式启用 mutation 循环
 
-只在隔离测试集群中设置 `ATLAS_TEST_ENABLE_MUTATIONS=1`。每种协议会使用唯一资源名执行 create → stale-version conflict → conditional update → read → conditional delete：
+只在隔离测试集群中设置 `ATLAS_TEST_ENABLE_MUTATIONS=1`。每种协议会使用唯一资源名执行 create → 启动实时监听 → stale-version conflict → conditional update → 收到脱敏变化事件 → read → conditional delete：
 
 ```bash
 ATLAS_TEST_ENABLE_MUTATIONS=1 \

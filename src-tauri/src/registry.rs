@@ -1,5 +1,6 @@
 mod adapters;
 mod mutations;
+mod watch;
 
 use std::{
     collections::BTreeMap,
@@ -13,7 +14,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::credentials::ConnectionSecret;
@@ -39,6 +40,7 @@ pub enum Capability {
     Probe,
     Browse,
     Read,
+    Watch,
     Create,
     Update,
     Delete,
@@ -261,6 +263,161 @@ impl OperationId {
     }
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SubscriptionId(String);
+
+impl SubscriptionId {
+    pub fn new(value: impl Into<String>) -> Result<Self, RegistryError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(RegistryError::validation("subscription id cannot be blank"));
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchRequest {
+    pub address: ResourceAddress,
+    pub start_version: Option<String>,
+}
+
+impl WatchRequest {
+    pub fn validate(&self) -> Result<(), RegistryError> {
+        match &self.address {
+            ResourceAddress::Root => {
+                return Err(RegistryError::validation(
+                    "watch requires an explicit resource or etcd prefix",
+                ));
+            }
+            ResourceAddress::Etcd { key_base64 } => {
+                validate_watch_bytes(key_base64, "etcd key")?;
+            }
+            ResourceAddress::EtcdPrefix { prefix_base64 } => {
+                validate_watch_bytes(prefix_base64, "etcd prefix")?;
+            }
+            ResourceAddress::Zookeeper { path } => {
+                if !is_canonical_zookeeper_path(path) {
+                    return Err(RegistryError::validation(
+                        "ZooKeeper watch requires a canonical absolute path",
+                    ));
+                }
+                if self.start_version.is_some() {
+                    return Err(RegistryError::validation(
+                        "ZooKeeper watch cannot resume from a resource version",
+                    ));
+                }
+            }
+            ResourceAddress::NacosConfig { group, data_id } => {
+                if group.trim().is_empty() || data_id.trim().is_empty() {
+                    return Err(RegistryError::validation(
+                        "Nacos watch requires both group and dataId",
+                    ));
+                }
+                if self.start_version.is_some() {
+                    return Err(RegistryError::validation(
+                        "Nacos watch cannot resume from a resource version",
+                    ));
+                }
+            }
+        }
+        if let Some(version) = &self.start_version {
+            version
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .filter(|version| *version >= 0)
+                .ok_or_else(|| {
+                    RegistryError::validation(
+                        "etcd watch startVersion must be a non-negative revision",
+                    )
+                })?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_watch_bytes(value: &str, label: &str) -> Result<(), RegistryError> {
+    let decoded = STANDARD
+        .decode(value)
+        .map_err(|_| RegistryError::validation(format!("{label} is not valid base64")))?;
+    if decoded.is_empty() {
+        return Err(RegistryError::validation(format!(
+            "{label} cannot be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn is_canonical_zookeeper_path(path: &str) -> bool {
+    path.starts_with('/')
+        && (path == "/" || !path.ends_with('/'))
+        && !path.contains('\0')
+        && !path
+            .split('/')
+            .skip(1)
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WatchStatusState {
+    Starting,
+    Live,
+    Reconnecting,
+    Compacted,
+    SessionExpired,
+    Stopped,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WatchChangeKind {
+    Created,
+    Updated,
+    Deleted,
+    ChildrenChanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum WatchEvent {
+    Status {
+        subscription_id: String,
+        state: WatchStatusState,
+        message: Option<String>,
+        retry_in_ms: Option<u64>,
+    },
+    Change {
+        subscription_id: String,
+        change: WatchChangeKind,
+        address: ResourceAddress,
+        version: Option<String>,
+    },
+}
+
+impl WatchEvent {
+    pub(crate) fn status(
+        subscription_id: &SubscriptionId,
+        state: WatchStatusState,
+        message: Option<String>,
+        retry_in_ms: Option<u64>,
+    ) -> Self {
+        Self::Status {
+            subscription_id: subscription_id.as_str().to_owned(),
+            state,
+            message,
+            retry_in_ms,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueEncoding {
@@ -403,15 +560,7 @@ fn validate_mutation_address(address: &ResourceAddress) -> Result<(), RegistryEr
             Ok(())
         }
         ResourceAddress::Zookeeper { path } => {
-            if !path.starts_with('/')
-                || path == "/"
-                || path.ends_with('/')
-                || path.contains('\0')
-                || path
-                    .split('/')
-                    .skip(1)
-                    .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-            {
+            if path == "/" || !is_canonical_zookeeper_path(path) {
                 return Err(RegistryError::validation(
                     "ZooKeeper mutation requires a canonical absolute non-root path",
                 ));
@@ -729,6 +878,7 @@ impl RegistryCatalog {
                     Capability::Probe,
                     Capability::Browse,
                     Capability::Read,
+                    Capability::Watch,
                     Capability::Create,
                     Capability::Update,
                     Capability::Delete,
@@ -738,10 +888,17 @@ impl RegistryCatalog {
     }
 }
 
+#[derive(Clone)]
+struct WatchRegistration {
+    connection_id: String,
+    token: CancellationToken,
+}
+
 #[derive(Clone, Default)]
 pub struct RegistryService {
     sessions: Arc<RwLock<BTreeMap<String, RegistrySession>>>,
     operations: Arc<RwLock<BTreeMap<OperationId, CancellationToken>>>,
+    subscriptions: Arc<RwLock<BTreeMap<SubscriptionId, WatchRegistration>>>,
 }
 
 impl RegistryService {
@@ -828,6 +985,7 @@ impl RegistryService {
     }
 
     pub async fn close(&self, connection_id: &str) -> Result<(), RegistryError> {
+        self.cancel_watches_for_connection(connection_id).await;
         self.sessions
             .write()
             .await
@@ -966,6 +1124,129 @@ impl RegistryService {
         }
     }
 
+    pub async fn stop_watch(&self, subscription_id: &SubscriptionId) -> bool {
+        if let Some(registration) = self
+            .subscriptions
+            .read()
+            .await
+            .get(subscription_id)
+            .cloned()
+        {
+            registration.token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn start_watch(
+        &self,
+        subscription_id: SubscriptionId,
+        connection_id: String,
+        request: WatchRequest,
+    ) -> Result<mpsc::Receiver<WatchEvent>, RegistryError> {
+        request.validate()?;
+        let session = self.session(&connection_id).await?;
+        let running_id = subscription_id.clone();
+        self.start_watch_workflow(
+            subscription_id,
+            connection_id,
+            move |token, events| async move {
+                watch::run(session, running_id, request, token, events).await
+            },
+        )
+        .await
+    }
+
+    async fn cancel_watches_for_connection(&self, connection_id: &str) {
+        let tokens = self
+            .subscriptions
+            .read()
+            .await
+            .values()
+            .filter(|registration| registration.connection_id == connection_id)
+            .map(|registration| registration.token.clone())
+            .collect::<Vec<_>>();
+        for token in tokens {
+            token.cancel();
+        }
+    }
+
+    pub(crate) async fn start_watch_workflow<Run, RunFuture>(
+        &self,
+        subscription_id: SubscriptionId,
+        connection_id: String,
+        run: Run,
+    ) -> Result<mpsc::Receiver<WatchEvent>, RegistryError>
+    where
+        Run: FnOnce(CancellationToken, mpsc::Sender<WatchEvent>) -> RunFuture + Send + 'static,
+        RunFuture: Future<Output = Result<(), RegistryError>> + Send + 'static,
+    {
+        let token = CancellationToken::new();
+        {
+            let mut subscriptions = self.subscriptions.write().await;
+            if subscriptions.contains_key(&subscription_id) {
+                return Err(RegistryError::validation(format!(
+                    "subscription id '{}' is already active",
+                    subscription_id.as_str()
+                )));
+            }
+            subscriptions.insert(
+                subscription_id.clone(),
+                WatchRegistration {
+                    connection_id,
+                    token: token.clone(),
+                },
+            );
+        }
+
+        let (events, receiver) = mpsc::channel(64);
+        let registrations = self.subscriptions.clone();
+        tokio::spawn(async move {
+            if events
+                .send(WatchEvent::status(
+                    &subscription_id,
+                    WatchStatusState::Starting,
+                    None,
+                    None,
+                ))
+                .await
+                .is_err()
+            {
+                registrations.write().await.remove(&subscription_id);
+                return;
+            }
+
+            let running = run(token.clone(), events.clone());
+            tokio::pin!(running);
+            let terminal = tokio::select! {
+                result = &mut running => match result {
+                    Ok(()) => WatchEvent::status(
+                        &subscription_id,
+                        WatchStatusState::Stopped,
+                        None,
+                        None,
+                    ),
+                    Err(error) => WatchEvent::status(
+                        &subscription_id,
+                        WatchStatusState::Failed,
+                        Some(error.message),
+                        None,
+                    ),
+                },
+                () = events.closed() => {
+                    token.cancel();
+                    let _ = (&mut running).await;
+                    registrations.write().await.remove(&subscription_id);
+                    return;
+                }
+            };
+            let _ = events.send(terminal).await;
+            registrations.write().await.remove(&subscription_id);
+        });
+        Ok(receiver)
+    }
+
     async fn session(&self, connection_id: &str) -> Result<RegistrySession, RegistryError> {
         self.sessions
             .read()
@@ -1030,7 +1311,11 @@ impl RegistryService {
 
 #[cfg(test)]
 mod tests {
-    use super::{MutationPhase, OperationId, RegistryError, RegistryErrorCode, RegistryService};
+    use super::{
+        MutationPhase, OperationId, RegistryError, RegistryErrorCode, RegistryService,
+        ResourceAddress, SubscriptionId, WatchChangeKind, WatchEvent, WatchRequest,
+        WatchStatusState,
+    };
 
     #[tokio::test]
     async fn cancellation_interrupts_an_operation_and_removes_its_registration() {
@@ -1164,5 +1449,138 @@ mod tests {
         finish_tx.send(()).unwrap();
 
         assert!(task.await.unwrap().is_ok());
+    }
+
+    #[test]
+    fn watch_request_rejects_root_and_non_etcd_resume_versions() {
+        let root = WatchRequest {
+            address: ResourceAddress::Root,
+            start_version: None,
+        };
+        assert_eq!(
+            root.validate().unwrap_err().code,
+            RegistryErrorCode::Validation
+        );
+
+        let zookeeper = WatchRequest {
+            address: ResourceAddress::Zookeeper {
+                path: "/config/app".to_owned(),
+            },
+            start_version: Some("9".to_owned()),
+        };
+        assert_eq!(
+            zookeeper.validate().unwrap_err().code,
+            RegistryErrorCode::Validation
+        );
+    }
+
+    #[test]
+    fn watch_event_contract_never_contains_a_resource_value() {
+        let event = WatchEvent::Change {
+            subscription_id: "watch-1".to_owned(),
+            change: WatchChangeKind::Updated,
+            address: ResourceAddress::NacosConfig {
+                group: "DEFAULT_GROUP".to_owned(),
+                data_id: "application.yaml".to_owned(),
+            },
+            version: Some("md5-only".to_owned()),
+        };
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["kind"], "change");
+        assert_eq!(json["change"], "updated");
+        assert!(json.get("value").is_none());
+        assert!(json.get("content").is_none());
+    }
+
+    #[tokio::test]
+    async fn watch_subscription_ids_are_unique_and_cancellation_is_terminal() {
+        let service = RegistryService::default();
+        let subscription_id = SubscriptionId::new("watch-1").unwrap();
+        let mut events = service
+            .start_watch_workflow(
+                subscription_id.clone(),
+                "connection-a".to_owned(),
+                |token, _events| async move {
+                    token.cancelled().await;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events.recv().await,
+            Some(WatchEvent::Status {
+                state: WatchStatusState::Starting,
+                ..
+            })
+        ));
+        let duplicate = service
+            .start_watch_workflow(
+                subscription_id.clone(),
+                "connection-a".to_owned(),
+                |_token, _events| async move { Ok(()) },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(duplicate.code, RegistryErrorCode::Validation);
+
+        assert!(service.stop_watch(&subscription_id).await);
+        assert!(matches!(
+            events.recv().await,
+            Some(WatchEvent::Status {
+                state: WatchStatusState::Stopped,
+                ..
+            })
+        ));
+        for _ in 0..10 {
+            if !service.stop_watch(&subscription_id).await {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("watch registration should be removed after cancellation");
+    }
+
+    #[tokio::test]
+    async fn closing_a_connection_cancels_only_its_watch_subscriptions() {
+        let service = RegistryService::default();
+        let first = SubscriptionId::new("first").unwrap();
+        let second = SubscriptionId::new("second").unwrap();
+        let mut first_events = service
+            .start_watch_workflow(
+                first.clone(),
+                "connection-a".to_owned(),
+                |token, _events| async move {
+                    token.cancelled().await;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        let _second_events = service
+            .start_watch_workflow(
+                second.clone(),
+                "connection-b".to_owned(),
+                |token, _events| async move {
+                    token.cancelled().await;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        let _ = first_events.recv().await;
+
+        service.cancel_watches_for_connection("connection-a").await;
+
+        assert!(matches!(
+            first_events.recv().await,
+            Some(WatchEvent::Status {
+                state: WatchStatusState::Stopped,
+                ..
+            })
+        ));
+        assert!(service.stop_watch(&second).await);
     }
 }

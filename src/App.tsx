@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MutationConfirmationDialog,
   NewResourceDialog,
@@ -13,6 +13,7 @@ import {
   deleteConnectionProfile,
   errorMessage,
   isCancelled,
+  isNotFound,
   isOutcomeUnknown,
   listResources,
   loadConnectionProfiles,
@@ -22,6 +23,8 @@ import {
   probeConnection,
   readResource,
   registryCapabilities,
+  startWatch,
+  stopWatch,
   upsertConnectionProfile,
   type AdapterDescriptor,
   type AdapterId,
@@ -31,6 +34,9 @@ import {
   type ResourceDocument,
   type ResourceNode,
   type ResourceMutation,
+  type WatchEvent,
+  type WatchHandle,
+  type WatchStatusState,
 } from "./registry";
 
 type ResourceRow = {
@@ -48,6 +54,35 @@ type MoreRow = {
 };
 
 type TreeRow = ResourceRow | MoreRow;
+type WatchChangeEvent = Extract<WatchEvent, { kind: "change" }>;
+
+type ResourceWatchView = {
+  subscriptionId: string;
+  address: ResourceAddress;
+  state: WatchStatusState;
+  message?: string;
+  retryInMs?: number;
+  changeCount: number;
+  lastChange?: WatchChangeEvent;
+  remoteChanged: boolean;
+};
+
+const watchStatusLabels: Record<WatchStatusState, string> = {
+  starting: "正在建立监听",
+  live: "实时监听中",
+  reconnecting: "连接中断，正在恢复",
+  compacted: "历史事件已压缩，需要刷新",
+  sessionExpired: "会话已过期，需要重新连接",
+  stopped: "监听已停止",
+  failed: "监听失败",
+};
+
+const watchChangeLabels: Record<WatchChangeEvent["change"], string> = {
+  created: "已创建",
+  updated: "已更新",
+  deleted: "已删除",
+  childrenChanged: "子节点已变化",
+};
 
 const emptyForm = (): ConnectionProfile => ({
   id: newConnectionId(),
@@ -133,6 +168,10 @@ function addressLabel(address: ResourceAddress) {
   }
 }
 
+function sameAddress(left: ResourceAddress, right: ResourceAddress) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function utf8Base64(value: string) {
   const bytes = new TextEncoder().encode(value);
   let binary = "";
@@ -162,6 +201,9 @@ export function App() {
   const [resourceDraft, setResourceDraft] = useState<NewResourceDraft>(() => emptyResourceDraft("etcd"));
   const [pendingMutation, setPendingMutation] = useState<ResourceMutation>();
   const [confirmationText, setConfirmationText] = useState("");
+  const [resourceWatch, setResourceWatch] = useState<ResourceWatchView>();
+  const watchHandle = useRef<WatchHandle | undefined>(undefined);
+  const watchGeneration = useRef(0);
 
   const selectedProfile = profiles.find((profile) => profile.id === selectedId);
   const selectedSession = selectedId ? sessions[selectedId] : undefined;
@@ -173,6 +215,12 @@ export function App() {
     loadConnectionProfiles()
       .then(setProfiles)
       .catch((reason: unknown) => setMessage(errorMessage(reason)));
+  }, []);
+
+  useEffect(() => () => {
+    watchGeneration.current += 1;
+    const active = watchHandle.current;
+    if (active) void stopWatch(active.subscriptionId);
   }, []);
 
   const visibleRows = useMemo(() => {
@@ -220,6 +268,124 @@ export function App() {
     setDraftValue(nextDocument?.value.content ?? "");
   };
 
+  const releaseActiveWatch = async (clearView = true) => {
+    const active = watchHandle.current;
+    watchHandle.current = undefined;
+    if (clearView) setResourceWatch(undefined);
+    if (!active) return;
+    try {
+      await stopWatch(active.subscriptionId);
+    } catch (reason) {
+      if (!clearView) setMessage(errorMessage(reason));
+    }
+  };
+
+  const stopActiveWatch = async (clearView = true) => {
+    watchGeneration.current += 1;
+    await releaseActiveWatch(clearView);
+  };
+
+  const handleWatchEvent = (event: WatchEvent) => {
+    setResourceWatch((current) => {
+      if (!current || current.subscriptionId !== event.subscriptionId) return current;
+      if (event.kind === "status") {
+        if (event.state === "stopped" || event.state === "failed") {
+          if (watchHandle.current?.subscriptionId === event.subscriptionId) {
+            watchHandle.current = undefined;
+          }
+        }
+        return {
+          ...current,
+          state: event.state,
+          message: event.message,
+          retryInMs: event.retryInMs,
+          remoteChanged: event.state === "compacted" ? true : current.remoteChanged,
+        };
+      }
+      return {
+        ...current,
+        changeCount: current.changeCount + 1,
+        lastChange: event,
+        remoteChanged: true,
+      };
+    });
+  };
+
+  const startResourceWatch = async () => {
+    if (!selectedSession || !selectedProfile || !document || busy) return;
+    const generation = watchGeneration.current + 1;
+    watchGeneration.current = generation;
+    await releaseActiveWatch();
+    if (watchGeneration.current !== generation) return;
+    const subscriptionId = newConnectionId();
+    const address = document.address;
+    setResourceWatch({
+      subscriptionId,
+      address,
+      state: "starting",
+      changeCount: 0,
+      remoteChanged: false,
+    });
+    try {
+      const handle = await startWatch(
+        selectedSession.id,
+        subscriptionId,
+        address,
+        handleWatchEvent,
+        selectedProfile.adapter === "etcd" ? document.version : undefined,
+      );
+      if (watchGeneration.current !== generation) {
+        await stopWatch(handle.subscriptionId);
+        return;
+      }
+      watchHandle.current = handle;
+    } catch (reason) {
+      if (watchGeneration.current !== generation) return;
+      setResourceWatch((current) => current?.subscriptionId === subscriptionId
+        ? { ...current, state: "failed", message: errorMessage(reason) }
+        : current);
+      setMessage(errorMessage(reason));
+    }
+  };
+
+  const stopResourceWatch = async () => {
+    await stopActiveWatch(false);
+    setResourceWatch((current) => current
+      ? { ...current, state: "stopped", message: undefined, retryInMs: undefined }
+      : current);
+  };
+
+  const refreshWatchedResource = async () => {
+    if (!selectedSession || !document || busy) return;
+    if (draftValue !== document.value.content
+      && !globalThis.confirm("远端资源已变化。刷新会丢弃当前未保存的编辑，是否继续？")) {
+      return;
+    }
+    setBusy(true);
+    setMessage(undefined);
+    try {
+      showDocument(await runRead(selectedSession.id, document.address));
+      setResourceWatch((current) => current ? { ...current, remoteChanged: false } : current);
+      setMessage("已读取远端最新版本");
+    } catch (reason) {
+      if (isNotFound(reason)) {
+        await stopActiveWatch();
+        showDocument(undefined);
+        setSelectedAddress(undefined);
+        try {
+          await reloadRoot(selectedSession.id);
+        } catch {
+          // The deletion is already known; a tree refresh failure should not restore stale content.
+        }
+        setMessage("远端资源已删除，已移除本地旧内容");
+      } else {
+        setMessage(`刷新监听资源失败：${errorMessage(reason)}`);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const reloadRoot = async (connectionId: string) => {
     const page = await runList(connectionId, ROOT_ADDRESS);
     setRows(pageRows(page.items, 0, page.parent, page.nextCursor));
@@ -235,6 +401,7 @@ export function App() {
   };
 
   const connectAndLoad = async (profile: ConnectionProfile, transientSecret?: string) => {
+    await stopActiveWatch();
     setBusy(true);
     setMessage(undefined);
     showDocument(undefined);
@@ -309,6 +476,7 @@ export function App() {
   };
 
   const selectProfile = async (profile: ConnectionProfile) => {
+    await stopActiveWatch();
     setSelectedId(profile.id);
     setRows([]);
     showDocument(undefined);
@@ -331,6 +499,9 @@ export function App() {
 
   const openResource = async (index: number, row: ResourceRow) => {
     if (!selectedSession || busy) return;
+    if (!document || !sameAddress(document.address, row.node.address)) {
+      await stopActiveWatch();
+    }
     setSelectedAddress(row.node.address);
     setMessage(undefined);
 
@@ -527,12 +698,14 @@ export function App() {
     try {
       await reloadRoot(selectedSession.id);
       if (result.operation === "delete") {
+        await stopActiveWatch();
         showDocument(undefined);
         setSelectedAddress(undefined);
       } else {
         const refreshed = await runRead(selectedSession.id, result.address);
         showDocument(refreshed);
         setSelectedAddress(result.address);
+        setResourceWatch((current) => current ? { ...current, remoteChanged: false } : current);
       }
       setMessage(
         result.consistency === "atomic"
@@ -548,6 +721,7 @@ export function App() {
 
   const disconnect = async () => {
     if (!selectedSession) return;
+    await stopActiveWatch();
     try {
       await closeConnection(selectedSession.id);
     } catch {
@@ -597,6 +771,7 @@ export function App() {
     if (!globalThis.confirm(`确定删除连接“${form.name}”吗？系统凭据也会一并删除。`)) return;
     setBusy(true);
     try {
+      if (selectedId === form.id) await stopActiveWatch();
       if (sessions[form.id]) {
         try {
           await closeConnection(form.id);
@@ -626,6 +801,10 @@ export function App() {
       setBusy(false);
     }
   };
+
+  const watchBackendIsActive = resourceWatch
+    ? ["starting", "live", "reconnecting", "compacted", "sessionExpired"].includes(resourceWatch.state)
+    : false;
 
   return (
     <div className="app">
@@ -752,6 +931,36 @@ export function App() {
                 <div><span>版本</span><strong>{document.version || "—"}</strong></div>
                 <div><span>编码</span><strong>{document.value.encoding.toUpperCase()}</strong></div>
                 <div><span>大小</span><strong>{document.value.sizeBytes.toLocaleString()} B</strong></div>
+              </div>
+              <div className={`watch-panel ${resourceWatch?.state ?? "idle"} ${resourceWatch?.remoteChanged ? "changed" : ""}`}>
+                <div className="watch-summary">
+                  <span className="watch-pulse" />
+                  <div>
+                    <b>{resourceWatch ? watchStatusLabels[resourceWatch.state] : "实时监听未开启"}</b>
+                    <span>
+                      {resourceWatch?.message
+                        ? `${resourceWatch.message}${resourceWatch.retryInMs ? ` · ${resourceWatch.retryInMs} ms 后重试` : ""}`
+                        : (resourceWatch?.lastChange
+                          ? `${watchChangeLabels[resourceWatch.lastChange.change]} · 版本 ${resourceWatch.lastChange.version ?? "未知"}`
+                          : "监听事件只包含地址、类型和版本，不传输资源值")}
+                    </span>
+                  </div>
+                  {resourceWatch && <span className="watch-count">{resourceWatch.changeCount} 次变化</span>}
+                </div>
+                <div className="watch-actions">
+                  {resourceWatch?.remoteChanged && (
+                    <button className="button primary" disabled={busy} onClick={() => void refreshWatchedResource()}>
+                      读取最新版本
+                    </button>
+                  )}
+                  <button
+                    className="button"
+                    disabled={busy}
+                    onClick={() => void (watchBackendIsActive ? stopResourceWatch() : startResourceWatch())}
+                  >
+                    {watchBackendIsActive ? "停止监听" : resourceWatch ? "重新监听" : "开始监听"}
+                  </button>
+                </div>
               </div>
               {document.value.encoding === "base64" && (
                 <div className="binary-warning">该值不是有效 UTF-8，已使用 Base64 展示，内容没有被替换或损坏。</div>
