@@ -7,6 +7,7 @@ import {
 import { ConnectionDialog, type ConnectionDialogMode } from "./ConnectionDialog";
 import { HistoryDialog } from "./HistoryDialog";
 import { NacosHistoryDialog } from "./NacosHistoryDialog";
+import { NativeInfoDialog } from "./NativeInfoDialog";
 import { ExportDialog, ImportPreviewDialog } from "./TransferDialogs";
 import {
   ROOT_ADDRESS,
@@ -18,6 +19,7 @@ import {
   deleteConnectionProfile,
   errorMessage,
   exportResource,
+  inspectNativeResource,
   isCancelled,
   isNotFound,
   isOutcomeUnknown,
@@ -42,6 +44,7 @@ import {
   type ConnectionProfile,
   type ConnectionSession,
   type ImportPreview,
+  type NativeResourceInfo,
   type ResourceAddress,
   type ResourceDocument,
   type ResourceHistoryDocument,
@@ -295,6 +298,9 @@ export function App() {
   const [serverHistoryCursor, setServerHistoryCursor] = useState<string>();
   const [serverHistoryDetail, setServerHistoryDetail] = useState<ResourceHistoryDocument>();
   const [serverHistoryLoading, setServerHistoryLoading] = useState(false);
+  const [nativeInfoOpen, setNativeInfoOpen] = useState(false);
+  const [nativeInfo, setNativeInfo] = useState<NativeResourceInfo>();
+  const [nativeInfoLoading, setNativeInfoLoading] = useState(false);
   const [resourceWatch, setResourceWatch] = useState<ResourceWatchView>();
   const watchHandle = useRef<WatchHandle | undefined>(undefined);
   const watchGeneration = useRef(0);
@@ -512,6 +518,8 @@ export function App() {
 
   const connectAndLoad = async (profile: ConnectionProfile, transientSecret?: string) => {
     await stopActiveWatch();
+    setNativeInfoOpen(false);
+    setNativeInfo(undefined);
     setBusy(true);
     setMessage(undefined);
     showDocument(undefined);
@@ -593,6 +601,8 @@ export function App() {
     setExportDialogOpen(false);
     setImportPreview(undefined);
     setServerHistoryOpen(false);
+    setNativeInfoOpen(false);
+    setNativeInfo(undefined);
     showDocument(undefined);
     setSelectedAddress(undefined);
     setMessage(sessions[profile.id] ? "连接会话已打开，点击刷新加载资源" : undefined);
@@ -1100,6 +1110,31 @@ export function App() {
     }
   };
 
+  const openNativeInfo = async () => {
+    if (!selectedSession || !selectedProfile || !document || busy) return;
+    if (document.address.type !== "etcd" && document.address.type !== "zookeeper") return;
+    setNativeInfo(undefined);
+    setNativeInfoOpen(true);
+    setNativeInfoLoading(true);
+    setBusy(true);
+    setMessage(undefined);
+    const operationId = startOperation();
+    try {
+      setNativeInfo(await inspectNativeResource(
+        selectedSession.id,
+        document.address,
+        operationId,
+      ));
+    } catch (reason) {
+      setNativeInfoOpen(false);
+      setMessage(isCancelled(reason) ? "原生元数据读取已取消" : errorMessage(reason));
+    } finally {
+      finishOperation(operationId);
+      setNativeInfoLoading(false);
+      setBusy(false);
+    }
+  };
+
   const disconnect = async () => {
     if (!selectedSession) return;
     await stopActiveWatch();
@@ -1118,6 +1153,8 @@ export function App() {
     setExportDialogOpen(false);
     setImportPreview(undefined);
     setServerHistoryOpen(false);
+    setNativeInfoOpen(false);
+    setNativeInfo(undefined);
     showDocument(undefined);
     setPendingMutation(undefined);
     setCreateDialogOpen(false);
@@ -1178,6 +1215,8 @@ export function App() {
         setExportDialogOpen(false);
         setImportPreview(undefined);
         setServerHistoryOpen(false);
+        setNativeInfoOpen(false);
+        setNativeInfo(undefined);
         showDocument(undefined);
         setSelectedAddress(undefined);
       }
@@ -1338,6 +1377,10 @@ export function App() {
                 <div><span className="eyebrow">RESOURCE</span><h1>{document.name}</h1></div>
                 <div className="actions">
                   {document.address.type === "nacosConfig" && <button className="button" disabled={busy} onClick={openServerHistory}>服务端历史</button>}
+                  {document.address.type === "etcd"
+                    && Boolean(document.metadata.lease && document.metadata.lease !== "0")
+                    && <button className="button" disabled={busy} onClick={() => void openNativeInfo()}>Lease</button>}
+                  {document.address.type === "zookeeper" && <button className="button" disabled={busy} onClick={() => void openNativeInfo()}>ACL</button>}
                   <button className="button" disabled={busy} onClick={openExportDialog}>导出</button>
                   <button className="button danger" disabled={busy || !document.version} onClick={prepareDelete}>删除</button>
                   <button className="button primary" disabled={busy || !document.version || draftValue === document.value.content} onClick={prepareUpdate}>保存变更</button>
@@ -1484,6 +1527,19 @@ export function App() {
           onBack={() => setServerHistoryDetail(undefined)}
           onCancelOperation={() => void cancelActiveOperation()}
           onClose={() => setServerHistoryOpen(false)}
+        />
+      )}
+
+      {nativeInfoOpen && selectedProfile && selectedProfile.adapter !== "nacos" && (
+        <NativeInfoDialog
+          adapter={selectedProfile.adapter}
+          info={nativeInfo}
+          loading={nativeInfoLoading}
+          onCancelOperation={() => void cancelActiveOperation()}
+          onClose={() => {
+            setNativeInfoOpen(false);
+            setNativeInfo(undefined);
+          }}
         />
       )}
     </div>

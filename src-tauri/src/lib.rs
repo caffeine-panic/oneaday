@@ -6,10 +6,11 @@ pub mod transfer;
 
 use registry::{
     AdapterDescriptor, ConnectionProbe, ConnectionProfile, ConnectionSession, MutationPhase,
-    MutationResult, OperationId, RegistryCatalog, RegistryError, RegistryService, ResourceAddress,
-    ResourceDocument, ResourceHistoryDocument, ResourceHistoryPage, ResourceHistoryRequest,
-    ResourceMutation, ResourcePage, ResourcePageRequest, ResourceSearchPage, ResourceSearchRequest,
-    SubscriptionId, WatchEvent, WatchRequest,
+    MutationResult, NativeResourceInfo, OperationId, RegistryCatalog, RegistryError,
+    RegistryService, ResourceAddress, ResourceDocument, ResourceHistoryDocument,
+    ResourceHistoryPage, ResourceHistoryRequest, ResourceMutation, ResourcePage,
+    ResourcePageRequest, ResourceSearchPage, ResourceSearchRequest, SubscriptionId, WatchEvent,
+    WatchRequest,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State, ipc::Channel};
@@ -216,6 +217,28 @@ async fn read_resource_history(
             request.connection_id,
             request.address,
             request.revision_id,
+        )
+        .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectNativeResourceRequest {
+    connection_id: String,
+    operation_id: String,
+    address: ResourceAddress,
+}
+
+#[tauri::command]
+async fn inspect_native_resource(
+    service: State<'_, RegistryService>,
+    request: InspectNativeResourceRequest,
+) -> Result<NativeResourceInfo, RegistryError> {
+    service
+        .inspect_native_cancellable(
+            OperationId::new(request.operation_id)?,
+            request.connection_id,
+            request.address,
         )
         .await
 }
@@ -650,6 +673,7 @@ fn configured_builder<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::B
             search_resources,
             list_resource_history,
             read_resource_history,
+            inspect_native_resource,
             mutate_resource,
             export_resource,
             choose_import,
@@ -686,11 +710,11 @@ mod command_tests {
         let capabilities = capabilities.as_array().expect("adapter array");
         assert_eq!(
             capabilities[0]["capabilities"].as_array().map(Vec::len),
-            Some(8)
+            Some(9)
         );
         assert_eq!(
             capabilities[1]["capabilities"].as_array().map(Vec::len),
-            Some(8)
+            Some(9)
         );
         assert_eq!(
             capabilities[2]["capabilities"].as_array().map(Vec::len),
@@ -757,6 +781,22 @@ mod command_tests {
         )
         .expect_err("non-Nacos server history should be rejected");
         assert_eq!(history_error["code"], "unsupported");
+
+        let native_info_error = test::get_ipc_response(
+            &webview,
+            request(
+                "inspect_native_resource",
+                json!({
+                    "request": {
+                        "connectionId": "missing",
+                        "operationId": "invalid-native-info",
+                        "address": { "type": "root" }
+                    }
+                }),
+            ),
+        )
+        .expect_err("root native inspection should be rejected before session lookup");
+        assert_eq!(native_info_error["code"], "unsupported");
 
         let import_error = test::get_ipc_response(
             &webview,

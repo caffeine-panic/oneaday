@@ -13,7 +13,19 @@ export type AuthenticationMode = "none" | "usernamePassword" | "digest" | "custo
 export type AdapterDescriptor = {
   id: AdapterId;
   status: "available";
-  capabilities: Array<"probe" | "browse" | "search" | "read" | "watch" | "create" | "update" | "delete" | "history">;
+  capabilities: Array<
+    | "probe"
+    | "browse"
+    | "search"
+    | "read"
+    | "watch"
+    | "create"
+    | "update"
+    | "delete"
+    | "history"
+    | "lease"
+    | "acl"
+  >;
 };
 
 export type ConnectionProfile = {
@@ -118,6 +130,25 @@ export type ResourceHistoryDocument = {
   entry: ResourceHistoryEntry;
   value: ResourceDocument["value"];
 };
+
+export type NativeResourceInfo =
+  | {
+      kind: "etcdLease";
+      address: ResourceAddress;
+      leaseId: string;
+      remainingTtlSeconds: number;
+      grantedTtlSeconds: number;
+    }
+  | {
+      kind: "zookeeperAcl";
+      address: ResourceAddress;
+      aclVersion: number;
+      entries: Array<{
+        scheme: string;
+        id: string;
+        permissions: string[];
+      }>;
+    };
 
 export type ResourceDocument = {
   address: ResourceAddress;
@@ -383,6 +414,16 @@ export function readResourceHistory(
 ) {
   return invoke<ResourceHistoryDocument>("read_resource_history", {
     request: { connectionId, address, revisionId, operationId },
+  });
+}
+
+export function inspectNativeResource(
+  connectionId: string,
+  address: ResourceAddress,
+  operationId: string,
+) {
+  return invoke<NativeResourceInfo>("inspect_native_resource", {
+    request: { connectionId, address, operationId },
   });
 }
 

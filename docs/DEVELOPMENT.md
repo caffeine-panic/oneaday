@@ -28,7 +28,7 @@ ATLAS_TEST_NACOS_VERSION=v3
 ATLAS_TEST_NACOS_NAMESPACE=public
 ```
 
-默认情况下这些测试只执行连接、读取、列表与 value-free 标识搜索；配置了 Nacos fixture 时还会验证服务端历史列表和显式历史详情读取，不会写入测试集群。
+默认情况下这些测试只执行连接、读取、列表与 value-free 标识搜索；配置了 fixture 时还会检查 etcd key 关联 Lease（仅当 key 确实带 Lease）、ZooKeeper znode ACL，以及 Nacos 服务端历史列表和显式历史详情读取，不会写入测试集群。ZooKeeper fixture 凭据需要拥有读取该节点 ACL 的权限。
 
 认证测试可按协议提供 `ATLAS_TEST_<PROTOCOL>_USERNAME` 与
 `ATLAS_TEST_<PROTOCOL>_PASSWORD`（`PROTOCOL` 为 `ETCD`、`ZOOKEEPER` 或
@@ -54,6 +54,8 @@ ATLAS_TEST_ZOOKEEPER_PATH=/atlas/fixture \
 ATLAS_TEST_NACOS_GROUP=DEFAULT_GROUP \
 ATLAS_TEST_NACOS_DATA_ID=atlas-fixture.yaml
 ```
+
+原生检查保持有界且只读：etcd Lease TTL 查询不会要求服务端返回该 Lease 关联的全部 key；ZooKeeper ACL 最多接收 256 条规则。UI 不提供续租、撤销 Lease 或 ACL 修改入口。
 
 ### 显式启用 mutation 循环
 

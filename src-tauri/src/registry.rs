@@ -46,6 +46,8 @@ pub enum Capability {
     Update,
     Delete,
     History,
+    Lease,
+    Acl,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -216,13 +218,29 @@ pub struct ConnectionProbe {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ResourceAddress {
     Root,
-    Etcd { key_base64: String },
-    EtcdPrefix { prefix_base64: String },
-    Zookeeper { path: String },
-    NacosConfig { group: String, data_id: String },
+    Etcd {
+        #[serde(alias = "key_base64")]
+        key_base64: String,
+    },
+    EtcdPrefix {
+        #[serde(alias = "prefix_base64")]
+        prefix_base64: String,
+    },
+    Zookeeper {
+        path: String,
+    },
+    NacosConfig {
+        group: String,
+        #[serde(alias = "data_id")]
+        data_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -337,6 +355,34 @@ pub struct ResourceHistoryPage {
 pub struct ResourceHistoryDocument {
     pub entry: ResourceHistoryEntry,
     pub value: EncodedValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZookeeperAclEntry {
+    pub scheme: String,
+    pub id: String,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum NativeResourceInfo {
+    EtcdLease {
+        address: ResourceAddress,
+        lease_id: String,
+        remaining_ttl_seconds: i64,
+        granted_ttl_seconds: i64,
+    },
+    ZookeeperAcl {
+        address: ResourceAddress,
+        acl_version: i32,
+        entries: Vec<ZookeeperAclEntry>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
@@ -476,7 +522,11 @@ pub enum WatchChangeKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum WatchEvent {
     Status {
         subscription_id: String,
@@ -546,7 +596,11 @@ impl MutationValue {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "operation", rename_all = "camelCase")]
+#[serde(
+    tag = "operation",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ResourceMutation {
     Create {
         address: ResourceAddress,
@@ -972,8 +1026,10 @@ impl RegistryCatalog {
                     Capability::Update,
                     Capability::Delete,
                 ];
-                if id == AdapterId::Nacos {
-                    capabilities.push(Capability::History);
+                match id {
+                    AdapterId::Etcd => capabilities.push(Capability::Lease),
+                    AdapterId::Zookeeper => capabilities.push(Capability::Acl),
+                    AdapterId::Nacos => capabilities.push(Capability::History),
                 }
                 AdapterDescriptor {
                     id,
@@ -1216,6 +1272,28 @@ impl RegistryService {
         self.run_operation(operation_id, async move {
             let session = service.session(&connection_id).await?;
             session.read_history(address, revision_id).await
+        })
+        .await
+    }
+
+    pub async fn inspect_native_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        address: ResourceAddress,
+    ) -> Result<NativeResourceInfo, RegistryError> {
+        if !matches!(
+            &address,
+            ResourceAddress::Etcd { .. } | ResourceAddress::Zookeeper { .. }
+        ) {
+            return Err(RegistryError::unsupported(
+                "native inspection requires an etcd key or ZooKeeper znode",
+            ));
+        }
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            let session = service.session(&connection_id).await?;
+            session.inspect_native(address).await
         })
         .await
     }
@@ -1485,10 +1563,63 @@ impl RegistryService {
 #[cfg(test)]
 mod tests {
     use super::{
-        MutationPhase, OperationId, RegistryError, RegistryErrorCode, RegistryService,
-        ResourceAddress, ResourceSearchRequest, SubscriptionId, WatchChangeKind, WatchEvent,
-        WatchRequest, WatchStatusState,
+        MutationPhase, NativeResourceInfo, OperationId, RegistryError, RegistryErrorCode,
+        RegistryService, ResourceAddress, ResourceMutation, ResourceSearchRequest, SubscriptionId,
+        WatchChangeKind, WatchEvent, WatchRequest, WatchStatusState,
     };
+
+    #[test]
+    fn native_lease_contract_keeps_the_64_bit_identifier_lossless() {
+        let info = NativeResourceInfo::EtcdLease {
+            address: ResourceAddress::Etcd {
+                key_base64: "Y29uZmln".to_owned(),
+            },
+            lease_id: i64::MAX.to_string(),
+            remaining_ttl_seconds: 30,
+            granted_ttl_seconds: 60,
+        };
+
+        let json = serde_json::to_value(info).unwrap();
+        assert_eq!(json["kind"], "etcdLease");
+        assert_eq!(json["leaseId"], i64::MAX.to_string());
+        assert_eq!(json["remainingTtlSeconds"], 30);
+        assert_eq!(json["address"]["keyBase64"], "Y29uZmln");
+        assert!(json["address"].get("key_base64").is_none());
+    }
+
+    #[test]
+    fn mutation_contract_accepts_camel_case_version_fields() {
+        let mutation: ResourceMutation = serde_json::from_value(serde_json::json!({
+            "operation": "delete",
+            "address": { "type": "zookeeper", "path": "/config/app" },
+            "expectedVersion": "7"
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            mutation,
+            ResourceMutation::Delete {
+                expected_version,
+                ..
+            } if expected_version == "7"
+        ));
+    }
+
+    #[test]
+    fn resource_address_accepts_legacy_snake_case_exports() {
+        let address: ResourceAddress = serde_json::from_value(serde_json::json!({
+            "type": "nacosConfig",
+            "group": "DEFAULT_GROUP",
+            "data_id": "application.yaml"
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            address,
+            ResourceAddress::NacosConfig { group, data_id }
+                if group == "DEFAULT_GROUP" && data_id == "application.yaml"
+        ));
+    }
 
     #[test]
     fn search_request_trims_queries_and_rejects_unbounded_input() {
@@ -1686,6 +1817,8 @@ mod tests {
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["kind"], "change");
         assert_eq!(json["change"], "updated");
+        assert_eq!(json["subscriptionId"], "watch-1");
+        assert!(json.get("subscription_id").is_none());
         assert!(json.get("value").is_none());
         assert!(json.get("content").is_none());
     }

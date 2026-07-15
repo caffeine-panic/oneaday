@@ -27,8 +27,14 @@ fn catalog_reports_read_watch_and_safe_mutation_capabilities_for_each_native_ada
         Capability::Delete,
     ];
     assert_eq!(descriptors[0].status, AdapterStatus::Available);
-    assert_eq!(descriptors[0].capabilities, common);
-    assert_eq!(descriptors[1].capabilities, common);
+    assert_eq!(
+        descriptors[0].capabilities,
+        [common.clone(), vec![Capability::Lease]].concat()
+    );
+    assert_eq!(
+        descriptors[1].capabilities,
+        [common.clone(), vec![Capability::Acl]].concat()
+    );
     assert_eq!(
         descriptors[2].capabilities,
         [common, vec![Capability::History]].concat()

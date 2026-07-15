@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use etcd_client::{
-    Certificate, ConnectOptions, GetOptions, Identity, SortOrder, SortTarget,
-    TlsOptions as EtcdTlsOptions,
+    Certificate, ConnectOptions, GetOptions, Identity, LeaseTimeToLiveOptions, SortOrder,
+    SortTarget, TlsOptions as EtcdTlsOptions,
 };
 use nacos_sdk::api::{
     config::{ConfigService, ConfigServiceBuilder},
@@ -19,9 +19,10 @@ use crate::credentials::ConnectionSecret;
 
 use super::{
     AdapterId, AuthenticationMode, ConnectionProfile, EncodedValue, MutationPhase, MutationResult,
-    NacosApiVersion, RegistryError, RegistryErrorCode, ResourceAddress, ResourceDocument,
-    ResourceHistoryDocument, ResourceHistoryEntry, ResourceHistoryPage, ResourceHistoryRequest,
-    ResourceMutation, ResourceNode, ResourcePage, ResourceSearchPage, ResourceSearchRequest,
+    NacosApiVersion, NativeResourceInfo, RegistryError, RegistryErrorCode, ResourceAddress,
+    ResourceDocument, ResourceHistoryDocument, ResourceHistoryEntry, ResourceHistoryPage,
+    ResourceHistoryRequest, ResourceMutation, ResourceNode, ResourcePage, ResourceSearchPage,
+    ResourceSearchRequest, ZookeeperAclEntry,
     mutations::{mutate_etcd, mutate_nacos, mutate_zookeeper},
 };
 use nacos_auth::NacosRequestAuth;
@@ -171,6 +172,23 @@ impl RegistrySession {
         })
         .await
         .map_err(|_| RegistryError::timeout("historical resource read"))?
+    }
+
+    pub(super) async fn inspect_native(
+        &self,
+        address: ResourceAddress,
+    ) -> Result<NativeResourceInfo, RegistryError> {
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Etcd(client) => inspect_etcd_lease(client.as_ref().clone(), address).await,
+                Self::Zookeeper(client) => inspect_zookeeper_acl(client, address).await,
+                Self::Nacos(_) => Err(RegistryError::unsupported(
+                    "Nacos native history is exposed through the history commands",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| RegistryError::timeout("native resource inspection"))?
     }
 
     pub(super) async fn mutate(
@@ -579,6 +597,45 @@ async fn read_etcd(
     })
 }
 
+async fn inspect_etcd_lease(
+    mut client: etcd_client::Client,
+    address: ResourceAddress,
+) -> Result<NativeResourceInfo, RegistryError> {
+    let key = match &address {
+        ResourceAddress::Etcd { key_base64 } => decode_base64(key_base64, "etcd key")?,
+        _ => return Err(adapter_mismatch(AdapterId::Etcd, &address)),
+    };
+    let response = client
+        .get(key, Some(GetOptions::new().with_keys_only()))
+        .await
+        .map_err(|error| RegistryError::network(format!("etcd lease lookup failed: {error}")))?;
+    let lease_id = response
+        .kvs()
+        .first()
+        .ok_or_else(|| RegistryError::not_found("etcd key does not exist"))?
+        .lease();
+    if lease_id == 0 {
+        return Err(RegistryError::unsupported(
+            "the selected etcd key is not attached to a lease",
+        ));
+    }
+    let lease = client
+        .lease_time_to_live(lease_id, Some(LeaseTimeToLiveOptions::new()))
+        .await
+        .map_err(|error| {
+            RegistryError::network(format!("etcd lease inspection failed: {error}"))
+        })?;
+    if lease.ttl() < 0 {
+        return Err(RegistryError::not_found("the etcd lease no longer exists"));
+    }
+    Ok(NativeResourceInfo::EtcdLease {
+        address,
+        lease_id: lease.id().to_string(),
+        remaining_ttl_seconds: lease.ttl(),
+        granted_ttl_seconds: lease.granted_ttl(),
+    })
+}
+
 async fn list_zookeeper(
     client: &zookeeper_client::Client,
     parent: ResourceAddress,
@@ -728,6 +785,55 @@ async fn read_zookeeper(
         version: Some(stat.version.to_string()),
         metadata,
     })
+}
+
+async fn inspect_zookeeper_acl(
+    client: &zookeeper_client::Client,
+    address: ResourceAddress,
+) -> Result<NativeResourceInfo, RegistryError> {
+    let path = match &address {
+        ResourceAddress::Zookeeper { path } => path,
+        _ => return Err(adapter_mismatch(AdapterId::Zookeeper, &address)),
+    };
+    let (acls, stat) = client.get_acl(path).await.map_err(|error| match error {
+        zookeeper_client::Error::NoNode => {
+            RegistryError::not_found("ZooKeeper znode does not exist")
+        }
+        zookeeper_client::Error::NoAuth | zookeeper_client::Error::AuthFailed => {
+            RegistryError::permission_denied("ZooKeeper ACL inspection was denied")
+        }
+        other => RegistryError::network(format!("ZooKeeper ACL inspection failed: {other}")),
+    })?;
+    if acls.len() > 256 {
+        return Err(RegistryError::invalid_response(
+            "ZooKeeper ACL response exceeds the 256-entry safety limit",
+        ));
+    }
+    Ok(NativeResourceInfo::ZookeeperAcl {
+        address,
+        acl_version: stat.aversion,
+        entries: acls.iter().map(normalize_zookeeper_acl).collect(),
+    })
+}
+
+fn normalize_zookeeper_acl(acl: &zookeeper_client::Acl) -> ZookeeperAclEntry {
+    let permission = acl.permission();
+    let permissions = [
+        (zookeeper_client::Permission::READ, "read"),
+        (zookeeper_client::Permission::WRITE, "write"),
+        (zookeeper_client::Permission::CREATE, "create"),
+        (zookeeper_client::Permission::DELETE, "delete"),
+        (zookeeper_client::Permission::ADMIN, "admin"),
+    ]
+    .into_iter()
+    .filter(|(required, _)| permission.has(*required))
+    .map(|(_, name)| name.to_owned())
+    .collect();
+    ZookeeperAclEntry {
+        scheme: acl.scheme().to_owned(),
+        id: acl.id().to_owned(),
+        permissions,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1428,7 +1534,7 @@ fn adapter_mismatch(adapter: AdapterId, address: &ResourceAddress) -> RegistryEr
 mod tests {
     use super::{
         NacosHistoryPageWire, etcd_cursor_after, etcd_immediate_child, nacos_http_error,
-        normalize_nacos_history_page, search_zookeeper_children,
+        normalize_nacos_history_page, normalize_zookeeper_acl, search_zookeeper_children,
     };
     use crate::registry::ResourceAddress;
 
@@ -1515,5 +1621,19 @@ mod tests {
                 .unwrap()
                 .contains("\"content\"")
         );
+    }
+
+    #[test]
+    fn zookeeper_acl_normalization_preserves_identity_and_permission_bits() {
+        use zookeeper_client::{Acl, AuthId, Permission};
+
+        let entry = normalize_zookeeper_acl(&Acl::new(
+            Permission::READ | Permission::WRITE | Permission::ADMIN,
+            AuthId::new("digest", "operator:hash"),
+        ));
+
+        assert_eq!(entry.scheme, "digest");
+        assert_eq!(entry.id, "operator:hash");
+        assert_eq!(entry.permissions, vec!["read", "write", "admin"]);
     }
 }

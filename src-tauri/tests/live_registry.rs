@@ -2,9 +2,9 @@ use atlas_registry_lib::{
     credentials::ConnectionSecret,
     registry::{
         AdapterId, AuthenticationMode, ConnectionAuth, ConnectionProfile, MutationValue,
-        NacosApiVersion, RegistryService, ResourceAddress, ResourceHistoryRequest,
-        ResourceMutation, ResourceSearchRequest, SubscriptionId, TlsProfile, ValueEncoding,
-        WatchEvent, WatchRequest, WatchStatusState,
+        NacosApiVersion, NativeResourceInfo, OperationId, RegistryService, ResourceAddress,
+        ResourceHistoryRequest, ResourceMutation, ResourceSearchRequest, SubscriptionId,
+        TlsProfile, ValueEncoding, WatchEvent, WatchRequest, WatchStatusState,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -118,16 +118,29 @@ fn etcd_live_session_can_browse_the_root() {
             .await
             .expect("etcd identifiers should be searchable without reading values");
         if let Ok(key) = std::env::var("ATLAS_TEST_ETCD_KEY") {
+            let address = ResourceAddress::Etcd {
+                key_base64: STANDARD.encode(key),
+            };
             let document = service
-                .read(
-                    &session.id,
-                    ResourceAddress::Etcd {
-                        key_base64: STANDARD.encode(key),
-                    },
-                )
+                .read(&session.id, address.clone())
                 .await
                 .expect("configured etcd fixture should be readable");
             assert!(document.metadata.contains_key("modRevision"));
+            if document
+                .metadata
+                .get("lease")
+                .is_some_and(|lease| lease != "0")
+            {
+                let info = service
+                    .inspect_native_cancellable(
+                        OperationId::new(format!("live-lease-{}", unique_suffix())).unwrap(),
+                        session.id.clone(),
+                        address,
+                    )
+                    .await
+                    .expect("configured etcd lease should be inspectable");
+                assert!(matches!(info, NativeResourceInfo::EtcdLease { .. }));
+            }
         }
         if mutations_enabled() {
             let prefix = std::env::var("ATLAS_TEST_ETCD_MUTATION_PREFIX")
@@ -174,11 +187,21 @@ fn zookeeper_live_session_can_browse_the_root() {
             .await
             .expect("ZooKeeper child identifiers should be searchable without reading data");
         if let Ok(path) = std::env::var("ATLAS_TEST_ZOOKEEPER_PATH") {
+            let address = ResourceAddress::Zookeeper { path };
             let document = service
-                .read(&session.id, ResourceAddress::Zookeeper { path })
+                .read(&session.id, address.clone())
                 .await
                 .expect("configured ZooKeeper fixture should be readable");
             assert!(document.metadata.contains_key("modifiedZxid"));
+            let info = service
+                .inspect_native_cancellable(
+                    OperationId::new(format!("live-acl-{}", unique_suffix())).unwrap(),
+                    session.id.clone(),
+                    address,
+                )
+                .await
+                .expect("configured ZooKeeper ACL should be inspectable");
+            assert!(matches!(info, NativeResourceInfo::ZookeeperAcl { .. }));
         }
         if mutations_enabled() {
             let parent = std::env::var("ATLAS_TEST_ZOOKEEPER_MUTATION_PARENT")
@@ -258,11 +281,7 @@ fn nacos_live_session_can_browse_the_config_list() {
             if let Some(entry) = history.items.first() {
                 service
                     .read_history_cancellable(
-                        atlas_registry_lib::registry::OperationId::new(format!(
-                            "live-history-{}",
-                            unique_suffix()
-                        ))
-                        .unwrap(),
+                        OperationId::new(format!("live-history-{}", unique_suffix())).unwrap(),
                         session.id.clone(),
                         address,
                         entry.revision_id.clone(),
