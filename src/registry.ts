@@ -13,7 +13,7 @@ export type AuthenticationMode = "none" | "usernamePassword" | "digest" | "custo
 export type AdapterDescriptor = {
   id: AdapterId;
   status: "available";
-  capabilities: Array<"probe" | "browse" | "search" | "read" | "watch" | "create" | "update" | "delete">;
+  capabilities: Array<"probe" | "browse" | "search" | "read" | "watch" | "create" | "update" | "delete" | "history">;
 };
 
 export type ConnectionProfile = {
@@ -93,6 +93,30 @@ export type ResourceSearchPage = {
   nextCursor?: string;
   scanned: number;
   exhaustive: boolean;
+};
+
+export type ResourceHistoryEntry = {
+  revisionId: string;
+  address: ResourceAddress;
+  md5?: string;
+  operation?: string;
+  sourceUser?: string;
+  sourceIp?: string;
+  createdAt?: string;
+  modifiedAt?: string;
+  publishType?: string;
+  contentType?: string;
+};
+
+export type ResourceHistoryPage = {
+  address: ResourceAddress;
+  items: ResourceHistoryEntry[];
+  nextCursor?: string;
+};
+
+export type ResourceHistoryDocument = {
+  entry: ResourceHistoryEntry;
+  value: ResourceDocument["value"];
 };
 
 export type ResourceDocument = {
@@ -190,6 +214,29 @@ export type ImportApplyResult = {
     error: RegistryError;
   };
   remaining: number;
+};
+
+export type AuditHistoryKind = "started" | "applied" | "failed" | "outcomeUnknown";
+
+export type AuditHistoryItem = {
+  kind: AuditHistoryKind;
+  timestampMs: number;
+  connectionId: string;
+  operationId: string;
+  operation?: "create" | "update" | "delete";
+  address?: ResourceAddress;
+  expectedVersion?: string;
+  previous?: ResourceSnapshot;
+  current?: ResourceSnapshot;
+  consistency?: "atomic" | "checkedBeforeMutation";
+  errorCode?: string;
+};
+
+export type AuditHistoryPage = {
+  items: AuditHistoryItem[];
+  nextCursor?: string;
+  scannedBytes: number;
+  exhaustive: boolean;
 };
 
 export type WatchStatusState =
@@ -313,6 +360,32 @@ export function searchResources(
   });
 }
 
+export function listResourceHistory(
+  connectionId: string,
+  address: ResourceAddress,
+  operationId: string,
+  cursor?: string,
+) {
+  return invoke<ResourceHistoryPage>("list_resource_history", {
+    request: {
+      connectionId,
+      operationId,
+      history: { address, cursor, limit: 50 },
+    },
+  });
+}
+
+export function readResourceHistory(
+  connectionId: string,
+  address: ResourceAddress,
+  revisionId: string,
+  operationId: string,
+) {
+  return invoke<ResourceHistoryDocument>("read_resource_history", {
+    request: { connectionId, address, revisionId, operationId },
+  });
+}
+
 export function mutateResource(
   connectionId: string,
   mutation: ResourceMutation,
@@ -346,6 +419,12 @@ export function applyImport(
 ) {
   return invoke<ImportApplyResult>("apply_import", {
     request: { connectionId, planId, operationId, confirmed: true },
+  });
+}
+
+export function loadAuditHistory(connectionId?: string, cursor?: string) {
+  return invoke<AuditHistoryPage>("load_audit_history", {
+    request: { connectionId, cursor, limit: 50 },
   });
 }
 

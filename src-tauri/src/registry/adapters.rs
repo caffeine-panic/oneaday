@@ -20,6 +20,7 @@ use crate::credentials::ConnectionSecret;
 use super::{
     AdapterId, AuthenticationMode, ConnectionProfile, EncodedValue, MutationPhase, MutationResult,
     NacosApiVersion, RegistryError, RegistryErrorCode, ResourceAddress, ResourceDocument,
+    ResourceHistoryDocument, ResourceHistoryEntry, ResourceHistoryPage, ResourceHistoryRequest,
     ResourceMutation, ResourceNode, ResourcePage, ResourceSearchPage, ResourceSearchRequest,
     mutations::{mutate_etcd, mutate_nacos, mutate_zookeeper},
 };
@@ -136,6 +137,40 @@ impl RegistrySession {
         })
         .await
         .map_err(|_| RegistryError::timeout("resource search"))?
+    }
+
+    pub(super) async fn history(
+        &self,
+        request: ResourceHistoryRequest,
+        limit: usize,
+    ) -> Result<ResourceHistoryPage, RegistryError> {
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Nacos(session) => list_nacos_history(session, request, limit).await,
+                _ => Err(RegistryError::unsupported(
+                    "server resource history is currently available for Nacos configurations",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| RegistryError::timeout("resource history"))?
+    }
+
+    pub(super) async fn read_history(
+        &self,
+        address: ResourceAddress,
+        revision_id: String,
+    ) -> Result<ResourceHistoryDocument, RegistryError> {
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Nacos(session) => read_nacos_history(session, address, revision_id).await,
+                _ => Err(RegistryError::unsupported(
+                    "server resource history is currently available for Nacos configurations",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| RegistryError::timeout("historical resource read"))?
     }
 
     pub(super) async fn mutate(
@@ -723,6 +758,50 @@ struct NacosConfigItem {
     group_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NacosHistoryPageWire {
+    #[serde(default)]
+    page_number: usize,
+    #[serde(default)]
+    pages_available: usize,
+    #[serde(default)]
+    page_items: Vec<NacosHistoryItemWire>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NacosHistoryItemWire {
+    #[serde(default)]
+    id: serde_json::Value,
+    #[serde(default)]
+    data_id: String,
+    #[serde(default, alias = "group")]
+    group_name: String,
+    #[serde(default)]
+    md5: String,
+    #[serde(default)]
+    op_type: String,
+    #[serde(default)]
+    src_user: String,
+    #[serde(default)]
+    src_ip: String,
+    #[serde(default)]
+    created_time: serde_json::Value,
+    #[serde(default)]
+    last_modified_time: serde_json::Value,
+    #[serde(default)]
+    create_time: serde_json::Value,
+    #[serde(default)]
+    modify_time: serde_json::Value,
+    #[serde(default)]
+    publish_type: String,
+    #[serde(default, rename = "type")]
+    content_type: String,
+    #[serde(default)]
+    content: Option<String>,
+}
+
 async fn list_nacos(
     session: &NacosSession,
     parent: ResourceAddress,
@@ -939,6 +1018,266 @@ async fn read_nacos(
     })
 }
 
+async fn list_nacos_history(
+    session: &NacosSession,
+    request: ResourceHistoryRequest,
+    limit: usize,
+) -> Result<ResourceHistoryPage, RegistryError> {
+    let (group, data_id) = match &request.address {
+        ResourceAddress::NacosConfig { group, data_id } => (group, data_id),
+        _ => return Err(adapter_mismatch(AdapterId::Nacos, &request.address)),
+    };
+    let page_number = parse_page_number(request.cursor)?;
+    let page = match session.api_version {
+        NacosApiVersion::V2 => {
+            let url = format!(
+                "{}/nacos/v1/cs/history",
+                nacos_server_base(&session.endpoint)
+            );
+            session
+                .request_auth
+                .apply(session.http.get(url))
+                .query(&[
+                    ("search", "accurate".to_owned()),
+                    ("dataId", data_id.clone()),
+                    ("group", group.clone()),
+                    (
+                        "tenant",
+                        public_namespace_for_sdk(&session.namespace).to_owned(),
+                    ),
+                    ("pageNo", page_number.to_string()),
+                    ("pageSize", limit.to_string()),
+                ])
+                .send()
+                .await
+                .map_err(nacos_http_error)?
+                .error_for_status()
+                .map_err(nacos_http_error)?
+                .json::<NacosHistoryPageWire>()
+                .await
+                .map_err(|error| {
+                    RegistryError::invalid_response(format!(
+                        "invalid Nacos 2.x history response: {}",
+                        error.without_url()
+                    ))
+                })?
+        }
+        NacosApiVersion::V3 => {
+            let url = format!(
+                "{}/nacos/v3/admin/cs/history/list",
+                nacos_server_base(&session.endpoint)
+            );
+            let envelope = session
+                .request_auth
+                .apply(session.http.get(url))
+                .query(&[
+                    ("dataId", data_id.clone()),
+                    ("groupName", group.clone()),
+                    (
+                        "namespaceId",
+                        public_namespace_for_api(&session.namespace).to_owned(),
+                    ),
+                    ("pageNo", page_number.to_string()),
+                    ("pageSize", limit.to_string()),
+                ])
+                .send()
+                .await
+                .map_err(nacos_http_error)?
+                .error_for_status()
+                .map_err(nacos_http_error)?
+                .json::<NacosEnvelope<NacosHistoryPageWire>>()
+                .await
+                .map_err(|error| {
+                    RegistryError::invalid_response(format!(
+                        "invalid Nacos 3.x history response: {}",
+                        error.without_url()
+                    ))
+                })?;
+            unwrap_nacos_envelope(envelope, "history list")?
+        }
+    };
+    normalize_nacos_history_page(page, request.address)
+}
+
+async fn read_nacos_history(
+    session: &NacosSession,
+    address: ResourceAddress,
+    revision_id: String,
+) -> Result<ResourceHistoryDocument, RegistryError> {
+    if revision_id.is_empty()
+        || revision_id.len() > 32
+        || !revision_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(RegistryError::validation(
+            "Nacos history revision id must be a numeric identifier",
+        ));
+    }
+    let (group, data_id) = match &address {
+        ResourceAddress::NacosConfig { group, data_id } => (group, data_id),
+        _ => return Err(adapter_mismatch(AdapterId::Nacos, &address)),
+    };
+    let mut wire = match session.api_version {
+        NacosApiVersion::V2 => {
+            let url = format!(
+                "{}/nacos/v1/cs/history",
+                nacos_server_base(&session.endpoint)
+            );
+            session
+                .request_auth
+                .apply(session.http.get(url))
+                .query(&[
+                    ("dataId", data_id.clone()),
+                    ("group", group.clone()),
+                    (
+                        "tenant",
+                        public_namespace_for_sdk(&session.namespace).to_owned(),
+                    ),
+                    ("nid", revision_id.clone()),
+                ])
+                .send()
+                .await
+                .map_err(nacos_http_error)?
+                .error_for_status()
+                .map_err(nacos_http_error)?
+                .json::<NacosHistoryItemWire>()
+                .await
+                .map_err(|error| {
+                    RegistryError::invalid_response(format!(
+                        "invalid Nacos 2.x history detail response: {}",
+                        error.without_url()
+                    ))
+                })?
+        }
+        NacosApiVersion::V3 => {
+            let url = format!(
+                "{}/nacos/v3/admin/cs/history",
+                nacos_server_base(&session.endpoint)
+            );
+            let envelope = session
+                .request_auth
+                .apply(session.http.get(url))
+                .query(&[
+                    ("dataId", data_id.clone()),
+                    ("groupName", group.clone()),
+                    (
+                        "namespaceId",
+                        public_namespace_for_api(&session.namespace).to_owned(),
+                    ),
+                    ("nid", revision_id.clone()),
+                ])
+                .send()
+                .await
+                .map_err(nacos_http_error)?
+                .error_for_status()
+                .map_err(nacos_http_error)?
+                .json::<NacosEnvelope<NacosHistoryItemWire>>()
+                .await
+                .map_err(|error| {
+                    RegistryError::invalid_response(format!(
+                        "invalid Nacos 3.x history detail response: {}",
+                        error.without_url()
+                    ))
+                })?;
+            unwrap_nacos_envelope(envelope, "history detail")?
+        }
+    };
+    let content = wire.content.take().ok_or_else(|| {
+        RegistryError::invalid_response("Nacos history detail response has no content")
+    })?;
+    let entry = normalize_nacos_history_entry(wire, &address)?;
+    if entry.revision_id != revision_id {
+        return Err(RegistryError::invalid_response(
+            "Nacos history detail returned a different revision id",
+        ));
+    }
+    Ok(ResourceHistoryDocument {
+        entry,
+        value: EncodedValue::try_from_inline_bytes(content.as_bytes())?,
+    })
+}
+
+fn normalize_nacos_history_page(
+    page: NacosHistoryPageWire,
+    address: ResourceAddress,
+) -> Result<ResourceHistoryPage, RegistryError> {
+    let next_cursor =
+        (page.page_number < page.pages_available).then(|| (page.page_number + 1).to_string());
+    let items = page
+        .page_items
+        .into_iter()
+        .map(|item| normalize_nacos_history_entry(item, &address))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ResourceHistoryPage {
+        address,
+        items,
+        next_cursor,
+    })
+}
+
+fn normalize_nacos_history_entry(
+    item: NacosHistoryItemWire,
+    address: &ResourceAddress,
+) -> Result<ResourceHistoryEntry, RegistryError> {
+    let (expected_group, expected_data_id) = match address {
+        ResourceAddress::NacosConfig { group, data_id } => (group, data_id),
+        _ => return Err(adapter_mismatch(AdapterId::Nacos, address)),
+    };
+    if (!item.group_name.is_empty() && item.group_name != *expected_group)
+        || (!item.data_id.is_empty() && item.data_id != *expected_data_id)
+    {
+        return Err(RegistryError::invalid_response(
+            "Nacos history response returned a different configuration identity",
+        ));
+    }
+    let revision_id = json_scalar_string(&item.id)
+        .ok_or_else(|| RegistryError::invalid_response("Nacos history entry has no revision id"))?;
+    Ok(ResourceHistoryEntry {
+        revision_id,
+        address: address.clone(),
+        md5: non_empty(item.md5),
+        operation: non_empty(item.op_type),
+        source_user: non_empty(item.src_user),
+        source_ip: non_empty(item.src_ip),
+        created_at: json_scalar_string(&item.created_time)
+            .or_else(|| json_scalar_string(&item.create_time)),
+        modified_at: json_scalar_string(&item.last_modified_time)
+            .or_else(|| json_scalar_string(&item.modify_time)),
+        publish_type: non_empty(item.publish_type),
+        content_type: non_empty(item.content_type),
+    })
+}
+
+fn json_scalar_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn non_empty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
+}
+
+fn unwrap_nacos_envelope<T>(
+    envelope: NacosEnvelope<T>,
+    operation: &str,
+) -> Result<T, RegistryError> {
+    if envelope.code != 0 && envelope.code != 200 {
+        return Err(RegistryError::new(
+            RegistryErrorCode::Network,
+            format!(
+                "Nacos Admin API rejected the {operation} request: {}",
+                envelope.message
+            ),
+            false,
+        ));
+    }
+    envelope.data.ok_or_else(|| {
+        RegistryError::invalid_response(format!("Nacos {operation} response has no data"))
+    })
+}
+
 fn decode_base64(value: &str, label: &str) -> Result<Vec<u8>, RegistryError> {
     STANDARD
         .decode(value)
@@ -1088,8 +1427,10 @@ fn adapter_mismatch(adapter: AdapterId, address: &ResourceAddress) -> RegistryEr
 #[cfg(test)]
 mod tests {
     use super::{
-        etcd_cursor_after, etcd_immediate_child, nacos_http_error, search_zookeeper_children,
+        NacosHistoryPageWire, etcd_cursor_after, etcd_immediate_child, nacos_http_error,
+        normalize_nacos_history_page, search_zookeeper_children,
     };
+    use crate::registry::ResourceAddress;
 
     #[test]
     fn etcd_cursor_keeps_exact_keys_and_folder_prefixes_in_separate_ranges() {
@@ -1137,5 +1478,42 @@ mod tests {
         let sanitized = nacos_http_error(error);
         assert!(!sanitized.message.contains("TOP_SECRET_TOKEN"));
         assert!(!sanitized.message.contains("accessToken"));
+    }
+
+    #[test]
+    fn nacos_history_list_normalization_drops_historical_content() {
+        let wire: NacosHistoryPageWire = serde_json::from_value(serde_json::json!({
+            "pageNumber": 1,
+            "pagesAvailable": 2,
+            "pageItems": [{
+                "id": "9007199254740993",
+                "dataId": "application.yaml",
+                "group": "DEFAULT_GROUP",
+                "md5": "abc123",
+                "opType": "U",
+                "srcUser": "operator",
+                "lastModifiedTime": "2026-07-15T12:00:00+08:00",
+                "content": "TOP_SECRET_HISTORY_VALUE"
+            }]
+        }))
+        .unwrap();
+        let address = ResourceAddress::NacosConfig {
+            group: "DEFAULT_GROUP".to_owned(),
+            data_id: "application.yaml".to_owned(),
+        };
+
+        let page = normalize_nacos_history_page(wire, address).unwrap();
+        assert_eq!(page.items[0].revision_id, "9007199254740993");
+        assert_eq!(page.next_cursor.as_deref(), Some("2"));
+        assert!(
+            !serde_json::to_string(&page)
+                .unwrap()
+                .contains("TOP_SECRET_HISTORY_VALUE")
+        );
+        assert!(
+            !serde_json::to_string(&page)
+                .unwrap()
+                .contains("\"content\"")
+        );
     }
 }

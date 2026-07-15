@@ -7,8 +7,9 @@ pub mod transfer;
 use registry::{
     AdapterDescriptor, ConnectionProbe, ConnectionProfile, ConnectionSession, MutationPhase,
     MutationResult, OperationId, RegistryCatalog, RegistryError, RegistryService, ResourceAddress,
-    ResourceDocument, ResourceMutation, ResourcePage, ResourcePageRequest, ResourceSearchPage,
-    ResourceSearchRequest, SubscriptionId, WatchEvent, WatchRequest,
+    ResourceDocument, ResourceHistoryDocument, ResourceHistoryPage, ResourceHistoryRequest,
+    ResourceMutation, ResourcePage, ResourcePageRequest, ResourceSearchPage, ResourceSearchRequest,
+    SubscriptionId, WatchEvent, WatchRequest,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State, ipc::Channel};
@@ -169,6 +170,52 @@ async fn search_resources(
             OperationId::new(request.operation_id)?,
             request.connection_id,
             request.search,
+        )
+        .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListResourceHistoryRequest {
+    connection_id: String,
+    operation_id: String,
+    history: ResourceHistoryRequest,
+}
+
+#[tauri::command]
+async fn list_resource_history(
+    service: State<'_, RegistryService>,
+    request: ListResourceHistoryRequest,
+) -> Result<ResourceHistoryPage, RegistryError> {
+    service
+        .history_cancellable(
+            OperationId::new(request.operation_id)?,
+            request.connection_id,
+            request.history,
+        )
+        .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadResourceHistoryRequest {
+    connection_id: String,
+    operation_id: String,
+    address: ResourceAddress,
+    revision_id: String,
+}
+
+#[tauri::command]
+async fn read_resource_history(
+    service: State<'_, RegistryService>,
+    request: ReadResourceHistoryRequest,
+) -> Result<ResourceHistoryDocument, RegistryError> {
+    service
+        .read_history_cancellable(
+            OperationId::new(request.operation_id)?,
+            request.connection_id,
+            request.address,
+            request.revision_id,
         )
         .await
 }
@@ -494,6 +541,36 @@ async fn apply_import<R: tauri::Runtime>(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadAuditHistoryRequest {
+    connection_id: Option<String>,
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+#[tauri::command]
+async fn load_audit_history<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    audit: State<'_, audit::AuditLog>,
+    request: LoadAuditHistoryRequest,
+) -> Result<audit::AuditHistoryPage, RegistryError> {
+    let directory = app_config_directory(&app)?;
+    let connection_id = request
+        .connection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|connection_id| !connection_id.is_empty());
+    audit
+        .load_recent_in(
+            &directory,
+            connection_id,
+            request.cursor,
+            request.limit.unwrap_or(50),
+        )
+        .await
+}
+
 #[tauri::command]
 async fn cancel_operation(
     service: State<'_, RegistryService>,
@@ -571,10 +648,13 @@ fn configured_builder<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::B
             list_resources,
             read_resource,
             search_resources,
+            list_resource_history,
+            read_resource_history,
             mutate_resource,
             export_resource,
             choose_import,
             apply_import,
+            load_audit_history,
             cancel_operation,
             start_watch,
             stop_watch
@@ -603,12 +683,18 @@ mod command_tests {
                 .deserialize::<Value>()
                 .expect("capabilities should be JSON");
         assert_eq!(capabilities.as_array().map(Vec::len), Some(3));
-        assert!(
-            capabilities
-                .as_array()
-                .expect("adapter array")
-                .iter()
-                .all(|adapter| adapter["capabilities"].as_array().map(Vec::len) == Some(8))
+        let capabilities = capabilities.as_array().expect("adapter array");
+        assert_eq!(
+            capabilities[0]["capabilities"].as_array().map(Vec::len),
+            Some(8)
+        );
+        assert_eq!(
+            capabilities[1]["capabilities"].as_array().map(Vec::len),
+            Some(8)
+        );
+        assert_eq!(
+            capabilities[2]["capabilities"].as_array().map(Vec::len),
+            Some(9)
         );
 
         let watch_error = test::get_ipc_response(
@@ -651,6 +737,26 @@ mod command_tests {
         )
         .expect_err("blank search should be rejected by the public command");
         assert_eq!(search_error["code"], "validation");
+
+        let history_error = test::get_ipc_response(
+            &webview,
+            request(
+                "list_resource_history",
+                json!({
+                    "request": {
+                        "connectionId": "missing",
+                        "operationId": "invalid-history",
+                        "history": {
+                            "address": { "type": "root" },
+                            "cursor": null,
+                            "limit": 50
+                        }
+                    }
+                }),
+            ),
+        )
+        .expect_err("non-Nacos server history should be rejected");
+        assert_eq!(history_error["code"], "unsupported");
 
         let import_error = test::get_ipc_response(
             &webview,

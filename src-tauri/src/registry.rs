@@ -45,6 +45,7 @@ pub enum Capability {
     Create,
     Update,
     Delete,
+    History,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -283,6 +284,59 @@ pub struct ResourceSearchPage {
     /// Number of identifiers examined by this bounded request. Values are never read by search.
     pub scanned: usize,
     pub exhaustive: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceHistoryRequest {
+    pub address: ResourceAddress,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+impl ResourceHistoryRequest {
+    fn validate(&self) -> Result<(), RegistryError> {
+        match &self.address {
+            ResourceAddress::NacosConfig { group, data_id }
+                if !group.trim().is_empty() && !data_id.trim().is_empty() =>
+            {
+                Ok(())
+            }
+            _ => Err(RegistryError::unsupported(
+                "server resource history is currently available for Nacos configurations",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceHistoryEntry {
+    pub revision_id: String,
+    pub address: ResourceAddress,
+    pub md5: Option<String>,
+    pub operation: Option<String>,
+    pub source_user: Option<String>,
+    pub source_ip: Option<String>,
+    pub created_at: Option<String>,
+    pub modified_at: Option<String>,
+    pub publish_type: Option<String>,
+    pub content_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceHistoryPage {
+    pub address: ResourceAddress,
+    pub items: Vec<ResourceHistoryEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceHistoryDocument {
+    pub entry: ResourceHistoryEntry,
+    pub value: EncodedValue,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
@@ -674,7 +728,7 @@ pub struct ResourceSnapshot {
     pub encoding: ValueEncoding,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MutationOperation {
     Create,
@@ -682,7 +736,7 @@ pub enum MutationOperation {
     Delete,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MutationConsistency {
     Atomic,
@@ -732,7 +786,7 @@ impl MutationPhase {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MutationResult {
     pub operation: MutationOperation,
@@ -777,7 +831,7 @@ impl ResourceDocument {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RegistryErrorCode {
     Validation,
@@ -907,10 +961,8 @@ impl RegistryCatalog {
     pub fn descriptors(&self) -> Vec<AdapterDescriptor> {
         [AdapterId::Etcd, AdapterId::Zookeeper, AdapterId::Nacos]
             .into_iter()
-            .map(|id| AdapterDescriptor {
-                id,
-                status: AdapterStatus::Available,
-                capabilities: vec![
+            .map(|id| {
+                let mut capabilities = vec![
                     Capability::Probe,
                     Capability::Browse,
                     Capability::Search,
@@ -919,7 +971,15 @@ impl RegistryCatalog {
                     Capability::Create,
                     Capability::Update,
                     Capability::Delete,
-                ],
+                ];
+                if id == AdapterId::Nacos {
+                    capabilities.push(Capability::History);
+                }
+                AdapterDescriptor {
+                    id,
+                    status: AdapterStatus::Available,
+                    capabilities,
+                }
             })
             .collect()
     }
@@ -1111,6 +1171,51 @@ impl RegistryService {
         let service = self.clone();
         self.run_operation(operation_id, async move {
             service.search(&connection_id, request).await
+        })
+        .await
+    }
+
+    pub async fn history(
+        &self,
+        connection_id: &str,
+        request: ResourceHistoryRequest,
+    ) -> Result<ResourceHistoryPage, RegistryError> {
+        request.validate()?;
+        let limit = request.limit.unwrap_or(50).clamp(1, 200);
+        let session = self.session(connection_id).await?;
+        session.history(request, limit).await
+    }
+
+    pub async fn history_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        request: ResourceHistoryRequest,
+    ) -> Result<ResourceHistoryPage, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            service.history(&connection_id, request).await
+        })
+        .await
+    }
+
+    pub async fn read_history_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        address: ResourceAddress,
+        revision_id: String,
+    ) -> Result<ResourceHistoryDocument, RegistryError> {
+        ResourceHistoryRequest {
+            address: address.clone(),
+            cursor: None,
+            limit: None,
+        }
+        .validate()?;
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            let session = service.session(&connection_id).await?;
+            session.read_history(address, revision_id).await
         })
         .await
     }

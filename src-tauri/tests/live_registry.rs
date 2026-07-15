@@ -2,8 +2,9 @@ use atlas_registry_lib::{
     credentials::ConnectionSecret,
     registry::{
         AdapterId, AuthenticationMode, ConnectionAuth, ConnectionProfile, MutationValue,
-        NacosApiVersion, RegistryService, ResourceAddress, ResourceMutation, ResourceSearchRequest,
-        SubscriptionId, TlsProfile, ValueEncoding, WatchEvent, WatchRequest, WatchStatusState,
+        NacosApiVersion, RegistryService, ResourceAddress, ResourceHistoryRequest,
+        ResourceMutation, ResourceSearchRequest, SubscriptionId, TlsProfile, ValueEncoding,
+        WatchEvent, WatchRequest, WatchStatusState,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -237,11 +238,38 @@ fn nacos_live_session_can_browse_the_config_list() {
             std::env::var("ATLAS_TEST_NACOS_GROUP"),
             std::env::var("ATLAS_TEST_NACOS_DATA_ID"),
         ) {
+            let address = ResourceAddress::NacosConfig { group, data_id };
             let document = service
-                .read(&session.id, ResourceAddress::NacosConfig { group, data_id })
+                .read(&session.id, address.clone())
                 .await
                 .expect("configured Nacos fixture should be readable");
             assert!(document.metadata.contains_key("md5"));
+            let history = service
+                .history(
+                    &session.id,
+                    ResourceHistoryRequest {
+                        address: address.clone(),
+                        cursor: None,
+                        limit: Some(25),
+                    },
+                )
+                .await
+                .expect("configured Nacos fixture history should be listable");
+            if let Some(entry) = history.items.first() {
+                service
+                    .read_history_cancellable(
+                        atlas_registry_lib::registry::OperationId::new(format!(
+                            "live-history-{}",
+                            unique_suffix()
+                        ))
+                        .unwrap(),
+                        session.id.clone(),
+                        address,
+                        entry.revision_id.clone(),
+                    )
+                    .await
+                    .expect("configured Nacos fixture history detail should be readable");
+            }
         }
         if mutations_enabled() {
             let group = std::env::var("ATLAS_TEST_NACOS_MUTATION_GROUP")

@@ -1,5 +1,5 @@
 use atlas_registry_lib::{
-    audit::AuditLog,
+    audit::{AuditHistoryKind, AuditLog},
     registry::{
         MutationConsistency, MutationOperation, MutationResult, MutationValue, ResourceAddress,
         ResourceMutation, ResourceSnapshot, ValueEncoding,
@@ -69,6 +69,32 @@ fn audit_log_persists_started_and_applied_events_without_resource_values() {
         assert!(content.contains(&result.current.expect("current snapshot").sha256));
         assert!(!content.contains("TOP_SECRET_VALUE"));
         assert!(!content.contains("old secret"));
+
+        let first_page = log
+            .load_recent_in(&directory, Some("connection-1"), None, 2)
+            .await
+            .expect("recent audit events should load");
+        assert_eq!(first_page.items.len(), 2);
+        assert_eq!(first_page.items[0].kind, AuditHistoryKind::OutcomeUnknown);
+        assert_eq!(first_page.items[1].kind, AuditHistoryKind::Applied);
+        assert!(first_page.next_cursor.is_some());
+
+        let second_page = log
+            .load_recent_in(
+                &directory,
+                Some("connection-1"),
+                first_page.next_cursor.clone(),
+                2,
+            )
+            .await
+            .expect("older audit events should load by cursor");
+        assert_eq!(second_page.items.len(), 1);
+        assert_eq!(second_page.items[0].kind, AuditHistoryKind::Started);
+        assert!(second_page.next_cursor.is_none());
+
+        let serialized = serde_json::to_string(&first_page).expect("history page should serialize");
+        assert!(!serialized.contains("TOP_SECRET_VALUE"));
+        assert!(!serialized.contains("old secret"));
 
         tokio::fs::remove_dir_all(directory)
             .await

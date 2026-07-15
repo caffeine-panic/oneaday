@@ -5,6 +5,8 @@ import {
   type NewResourceDraft,
 } from "./MutationDialogs";
 import { ConnectionDialog, type ConnectionDialogMode } from "./ConnectionDialog";
+import { HistoryDialog } from "./HistoryDialog";
+import { NacosHistoryDialog } from "./NacosHistoryDialog";
 import { ExportDialog, ImportPreviewDialog } from "./TransferDialogs";
 import {
   ROOT_ADDRESS,
@@ -20,12 +22,15 @@ import {
   isNotFound,
   isOutcomeUnknown,
   listResources,
+  listResourceHistory,
+  loadAuditHistory,
   loadConnectionProfiles,
   newConnectionId,
   mutateResource,
   openConnection,
   probeConnection,
   readResource,
+  readResourceHistory,
   registryCapabilities,
   searchResources,
   startWatch,
@@ -33,11 +38,14 @@ import {
   upsertConnectionProfile,
   type AdapterDescriptor,
   type AdapterId,
+  type AuditHistoryItem,
   type ConnectionProfile,
   type ConnectionSession,
   type ImportPreview,
   type ResourceAddress,
   type ResourceDocument,
+  type ResourceHistoryDocument,
+  type ResourceHistoryEntry,
   type ResourceNode,
   type ResourceMutation,
   type WatchEvent,
@@ -276,9 +284,21 @@ export function App() {
   const [exportIncludeValue, setExportIncludeValue] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreview>();
   const [importConfirmationText, setImportConfirmationText] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyScope, setHistoryScope] = useState("all");
+  const [historyItems, setHistoryItems] = useState<AuditHistoryItem[]>([]);
+  const [historyCursor, setHistoryCursor] = useState<string>();
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [serverHistoryOpen, setServerHistoryOpen] = useState(false);
+  const [serverHistoryAddress, setServerHistoryAddress] = useState<ResourceAddress>();
+  const [serverHistoryItems, setServerHistoryItems] = useState<ResourceHistoryEntry[]>([]);
+  const [serverHistoryCursor, setServerHistoryCursor] = useState<string>();
+  const [serverHistoryDetail, setServerHistoryDetail] = useState<ResourceHistoryDocument>();
+  const [serverHistoryLoading, setServerHistoryLoading] = useState(false);
   const [resourceWatch, setResourceWatch] = useState<ResourceWatchView>();
   const watchHandle = useRef<WatchHandle | undefined>(undefined);
   const watchGeneration = useRef(0);
+  const historyGeneration = useRef(0);
 
   const selectedProfile = profiles.find((profile) => profile.id === selectedId);
   const selectedSession = selectedId ? sessions[selectedId] : undefined;
@@ -572,6 +592,7 @@ export function App() {
     setActiveSearch(undefined);
     setExportDialogOpen(false);
     setImportPreview(undefined);
+    setServerHistoryOpen(false);
     showDocument(undefined);
     setSelectedAddress(undefined);
     setMessage(sessions[profile.id] ? "连接会话已打开，点击刷新加载资源" : undefined);
@@ -984,6 +1005,101 @@ export function App() {
     }
   };
 
+  const loadHistory = async (scope: string, cursor?: string, append = false) => {
+    const generation = historyGeneration.current + 1;
+    historyGeneration.current = generation;
+    setHistoryLoading(true);
+    try {
+      const page = await loadAuditHistory(scope === "all" ? undefined : scope, cursor);
+      if (historyGeneration.current !== generation) return;
+      setHistoryItems((current) => append ? [...current, ...page.items] : page.items);
+      setHistoryCursor(page.nextCursor);
+    } catch (reason) {
+      if (historyGeneration.current === generation) setMessage(errorMessage(reason));
+    } finally {
+      if (historyGeneration.current === generation) setHistoryLoading(false);
+    }
+  };
+
+  const openHistory = () => {
+    const scope = selectedId ?? "all";
+    setHistoryScope(scope);
+    setHistoryItems([]);
+    setHistoryCursor(undefined);
+    setHistoryOpen(true);
+    void loadHistory(scope);
+  };
+
+  const changeHistoryScope = (scope: string) => {
+    setHistoryScope(scope);
+    setHistoryItems([]);
+    setHistoryCursor(undefined);
+    void loadHistory(scope);
+  };
+
+  const closeHistory = () => {
+    historyGeneration.current += 1;
+    setHistoryLoading(false);
+    setHistoryOpen(false);
+  };
+
+  const loadServerHistory = async (
+    address: ResourceAddress,
+    cursor?: string,
+    append = false,
+  ) => {
+    if (!selectedSession) return;
+    setServerHistoryLoading(true);
+    setMessage(undefined);
+    const operationId = startOperation();
+    try {
+      const page = await listResourceHistory(
+        selectedSession.id,
+        address,
+        operationId,
+        cursor,
+      );
+      setServerHistoryItems((current) => append ? [...current, ...page.items] : page.items);
+      setServerHistoryCursor(page.nextCursor);
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    } finally {
+      finishOperation(operationId);
+      setServerHistoryLoading(false);
+    }
+  };
+
+  const openServerHistory = () => {
+    if (!document || document.address.type !== "nacosConfig" || !selectedSession) return;
+    const address = document.address;
+    setServerHistoryAddress(address);
+    setServerHistoryItems([]);
+    setServerHistoryCursor(undefined);
+    setServerHistoryDetail(undefined);
+    setServerHistoryOpen(true);
+    void loadServerHistory(address);
+  };
+
+  const readServerHistory = async (entry: ResourceHistoryEntry) => {
+    if (!selectedSession || !serverHistoryAddress || serverHistoryLoading) return;
+    setServerHistoryLoading(true);
+    setMessage(undefined);
+    const operationId = startOperation();
+    try {
+      setServerHistoryDetail(await readResourceHistory(
+        selectedSession.id,
+        serverHistoryAddress,
+        entry.revisionId,
+        operationId,
+      ));
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    } finally {
+      finishOperation(operationId);
+      setServerHistoryLoading(false);
+    }
+  };
+
   const disconnect = async () => {
     if (!selectedSession) return;
     await stopActiveWatch();
@@ -1001,6 +1117,7 @@ export function App() {
     setActiveSearch(undefined);
     setExportDialogOpen(false);
     setImportPreview(undefined);
+    setServerHistoryOpen(false);
     showDocument(undefined);
     setPendingMutation(undefined);
     setCreateDialogOpen(false);
@@ -1060,6 +1177,7 @@ export function App() {
         setActiveSearch(undefined);
         setExportDialogOpen(false);
         setImportPreview(undefined);
+        setServerHistoryOpen(false);
         showDocument(undefined);
         setSelectedAddress(undefined);
       }
@@ -1087,6 +1205,7 @@ export function App() {
           <span className="status-dot" />
           {capabilities ? `Rust Core · ${capabilities.length} adapters` : "正在启动 Rust Core…"}
         </div>
+        <button className="button" onClick={openHistory}>历史</button>
         <button className="button primary" onClick={openNewConnection}>＋ 新建连接</button>
       </header>
 
@@ -1218,6 +1337,7 @@ export function App() {
               <div className="detail-title">
                 <div><span className="eyebrow">RESOURCE</span><h1>{document.name}</h1></div>
                 <div className="actions">
+                  {document.address.type === "nacosConfig" && <button className="button" disabled={busy} onClick={openServerHistory}>服务端历史</button>}
                   <button className="button" disabled={busy} onClick={openExportDialog}>导出</button>
                   <button className="button danger" disabled={busy || !document.version} onClick={prepareDelete}>删除</button>
                   <button className="button primary" disabled={busy || !document.version || draftValue === document.value.content} onClick={prepareUpdate}>保存变更</button>
@@ -1336,6 +1456,34 @@ export function App() {
           onCancel={() => setImportPreview(undefined)}
           onApply={() => void executeImport()}
           onCancelOperation={() => void cancelActiveOperation()}
+        />
+      )}
+
+      {historyOpen && (
+        <HistoryDialog
+          profiles={profiles}
+          scope={historyScope}
+          items={historyItems}
+          nextCursor={historyCursor}
+          loading={historyLoading}
+          onScopeChange={changeHistoryScope}
+          onLoadMore={() => void loadHistory(historyScope, historyCursor, true)}
+          onClose={closeHistory}
+        />
+      )}
+
+      {serverHistoryOpen && serverHistoryAddress && (
+        <NacosHistoryDialog
+          resourceName={document?.name ?? "Nacos 配置"}
+          items={serverHistoryItems}
+          nextCursor={serverHistoryCursor}
+          detail={serverHistoryDetail}
+          loading={serverHistoryLoading}
+          onRead={(entry) => void readServerHistory(entry)}
+          onLoadMore={() => void loadServerHistory(serverHistoryAddress, serverHistoryCursor, true)}
+          onBack={() => setServerHistoryDetail(undefined)}
+          onCancelOperation={() => void cancelActiveOperation()}
+          onClose={() => setServerHistoryOpen(false)}
         />
       )}
     </div>

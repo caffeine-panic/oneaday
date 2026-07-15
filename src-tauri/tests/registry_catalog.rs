@@ -16,20 +16,23 @@ fn catalog_reports_read_watch_and_safe_mutation_capabilities_for_each_native_ada
             .collect::<Vec<_>>(),
         vec![AdapterId::Etcd, AdapterId::Zookeeper, AdapterId::Nacos]
     );
-    assert!(descriptors.iter().all(|descriptor| {
-        descriptor.status == AdapterStatus::Available
-            && descriptor.capabilities
-                == vec![
-                    Capability::Probe,
-                    Capability::Browse,
-                    Capability::Search,
-                    Capability::Read,
-                    Capability::Watch,
-                    Capability::Create,
-                    Capability::Update,
-                    Capability::Delete,
-                ]
-    }));
+    let common = vec![
+        Capability::Probe,
+        Capability::Browse,
+        Capability::Search,
+        Capability::Read,
+        Capability::Watch,
+        Capability::Create,
+        Capability::Update,
+        Capability::Delete,
+    ];
+    assert_eq!(descriptors[0].status, AdapterStatus::Available);
+    assert_eq!(descriptors[0].capabilities, common);
+    assert_eq!(descriptors[1].capabilities, common);
+    assert_eq!(
+        descriptors[2].capabilities,
+        [common, vec![Capability::History]].concat()
+    );
 }
 
 #[test]
