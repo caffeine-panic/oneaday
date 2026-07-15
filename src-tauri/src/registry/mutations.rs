@@ -5,9 +5,13 @@ use zookeeper_client::{Acls, CreateMode, Error as ZookeeperError};
 
 use super::{
     AdapterId, MutationConsistency, MutationOperation, MutationPhase, MutationResult,
-    MutationValue, RegistryError, ResourceAddress, ResourceMutation, ResourceSnapshot,
-    ValueEncoding, adapters::NacosSession,
+    MutationValue, RegistryError, RegistryErrorCode, ResourceAddress, ResourceMutation,
+    ResourceSnapshot, ValueEncoding,
+    adapters::{NacosSession, read_nacos_authoritative},
 };
+
+const NACOS_WRITE_CONFIRM_ATTEMPTS: usize = 12;
+const NACOS_WRITE_CONFIRM_DELAY: std::time::Duration = std::time::Duration::from_millis(125);
 
 pub(super) async fn mutate_etcd(
     mut client: etcd_client::Client,
@@ -240,7 +244,12 @@ pub(super) async fn mutate_nacos(
             phase.mark_dispatched();
             let published = session
                 .config
-                .publish_config(data_id.clone(), group.clone(), content, content_type)
+                .publish_config(
+                    data_id.clone(),
+                    group.clone(),
+                    content.clone(),
+                    content_type,
+                )
                 .await
                 .map_err(|error| map_nacos_mutation_error("create", error))?;
             if !published {
@@ -248,7 +257,7 @@ pub(super) async fn mutate_nacos(
                     "Nacos create returned false",
                 ));
             }
-            let current = get_nacos_config(session, &data_id, &group)
+            let current = confirm_nacos_config_content(session, &data_id, &group, &content)
                 .await
                 .map_err(|error| {
                     RegistryError::mutation_outcome_unknown(format!(
@@ -274,13 +283,14 @@ pub(super) async fn mutate_nacos(
             let previous = get_nacos_config(session, &data_id, &group).await?;
             ensure_text_version(&expected_version, previous.md5(), "Nacos MD5")?;
             let content_type = content_type.or_else(|| Some(previous.content_type().clone()));
+            let content = nacos_content(value)?;
             phase.mark_dispatched();
             let published = match session
                 .config
                 .publish_config_cas(
                     data_id.clone(),
                     group.clone(),
-                    nacos_content(value)?,
+                    content.clone(),
                     content_type,
                     expected_version.clone(),
                 )
@@ -305,7 +315,7 @@ pub(super) async fn mutate_nacos(
                     "Nacos config changed after it was loaded; refresh before saving",
                 ));
             }
-            let current = get_nacos_config(session, &data_id, &group)
+            let current = confirm_nacos_config_content(session, &data_id, &group, &content)
                 .await
                 .map_err(|error| {
                     RegistryError::mutation_outcome_unknown(format!(
@@ -530,11 +540,29 @@ async fn get_nacos_config(
     data_id: &str,
     group: &str,
 ) -> Result<ConfigResponse, RegistryError> {
-    session
-        .config
-        .get_config(data_id.to_owned(), group.to_owned())
-        .await
-        .map_err(|error| map_nacos_error("read", error))
+    read_nacos_authoritative(session, data_id, group).await
+}
+
+async fn confirm_nacos_config_content(
+    session: &NacosSession,
+    data_id: &str,
+    group: &str,
+    expected_content: &str,
+) -> Result<ConfigResponse, RegistryError> {
+    for attempt in 0..NACOS_WRITE_CONFIRM_ATTEMPTS {
+        match read_nacos_authoritative(session, data_id, group).await {
+            Ok(response) if response.content() == expected_content => return Ok(response),
+            Ok(_) => {}
+            Err(error) if error.code == RegistryErrorCode::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if attempt + 1 < NACOS_WRITE_CONFIRM_ATTEMPTS {
+            tokio::time::sleep(NACOS_WRITE_CONFIRM_DELAY).await;
+        }
+    }
+    Err(RegistryError::not_found(
+        "Nacos config change did not become visible before the confirmation deadline",
+    ))
 }
 
 fn nacos_snapshot(response: &ConfigResponse) -> ResourceSnapshot {

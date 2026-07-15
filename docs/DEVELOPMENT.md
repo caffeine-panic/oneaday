@@ -30,6 +30,24 @@ ATLAS_TEST_NACOS_NAMESPACE=public
 
 默认情况下这些测试只执行连接、读取、列表与 value-free 标识搜索；配置了 fixture 时还会检查 etcd key 关联 Lease（仅当 key 确实带 Lease）、ZooKeeper znode ACL，以及 Nacos 服务端历史列表和显式历史详情读取，不会写入测试集群。ZooKeeper fixture 凭据需要拥有读取该节点 ACL 的权限。
 
+### 容器化兼容矩阵
+
+本地 Docker daemon 可用时，可以逐项运行与 CI 相同的隔离契约：
+
+```bash
+./scripts/compatibility-test.sh etcd 3.7.0
+./scripts/compatibility-test.sh zookeeper 3.9.5
+./scripts/compatibility-test.sh nacos 3.2.3 v3
+```
+
+脚本只绑定 loopback 端口，为每次运行创建无持久卷的临时容器和 fixture；失败时输出最后 300 行容器日志，结束后始终删除容器。固定矩阵为 etcd 3.6.11/3.7.0、ZooKeeper 3.8.6/3.9.5、Nacos 2.5.2/3.2.3，分别覆盖当前与上一条受维护协议线，以及 Nacos 2.x/3.x 管理 API 断代。版本依据为 [etcd 官方发布与版本策略](https://etcd.io/docs/v3.7/op-guide/versioning/)、[ZooKeeper 官方发布策略](https://zookeeper.apache.org/releases/) 和 [Nacos 官方 Releases](https://github.com/alibaba/nacos/releases)。
+
+如内部网络使用镜像仓库，可分别设置 `ATLAS_ETCD_IMAGE_REPOSITORY`、`ATLAS_ZOOKEEPER_IMAGE_REPOSITORY` 和 `ATLAS_NACOS_IMAGE_REPOSITORY`，值只包含仓库名，不包含版本 tag。Nacos 3.x 容器还会显式关闭仅用于隔离 fixture 的 Admin/Console 鉴权；这不改变应用对真实连接的认证处理。
+
+`.github/workflows/compatibility.yml` 每周及相关主干变更时执行六项真实服务契约；`.github/workflows/quality.yml` 在 Ubuntu 22.04、Windows 2025 与 macOS 15 上执行前端构建、Rust 测试/Clippy 和 Tauri release binary 构建。`.github/workflows/release.yml` 只接受匹配应用版本的 tag，并生成受保护的四平台 Draft Release。
+
+tag 发版、Draft Release、macOS 签名/公证 secrets 以及公开发布检查见 [RELEASING.md](./RELEASING.md)。发布 workflow 默认不会公开 release；缺少组织签名凭据时产物只能用于内部验证。
+
 认证测试可按协议提供 `ATLAS_TEST_<PROTOCOL>_USERNAME` 与
 `ATLAS_TEST_<PROTOCOL>_PASSWORD`（`PROTOCOL` 为 `ETCD`、`ZOOKEEPER` 或
 `NACOS`）。ZooKeeper 会使用 digest，其余两种协议使用用户名密码。etcd 与
@@ -55,7 +73,9 @@ ATLAS_TEST_NACOS_GROUP=DEFAULT_GROUP \
 ATLAS_TEST_NACOS_DATA_ID=atlas-fixture.yaml
 ```
 
-原生检查保持有界且只读：etcd Lease TTL 查询不会要求服务端返回该 Lease 关联的全部 key；ZooKeeper ACL 最多接收 256 条规则。UI 不提供续租、撤销 Lease 或 ACL 修改入口。
+原生检查保持有界且只读：etcd Lease 检查会读取一次所选 exact key，并复用 1 MiB value 边界后立即丢弃内容，因为 etcd 3.7 的 keys-only 优化不再返回 Lease 字段；TTL 查询不会要求服务端返回该 Lease 关联的全部 key。ZooKeeper ACL 最多接收 256 条规则。UI 不提供续租、撤销 Lease 或 ACL 修改入口。
+
+Nacos SDK 负责 gRPC mutation 与 listener；配置正文读取、写前检查和写后确认走对应 v2/v3 权威 HTTP API，避免 listener 移除后 SDK 残留 cache 把已删除配置作为当前值返回。
 
 ### 显式启用 mutation 循环
 

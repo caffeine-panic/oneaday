@@ -606,14 +606,18 @@ async fn inspect_etcd_lease(
         _ => return Err(adapter_mismatch(AdapterId::Etcd, &address)),
     };
     let response = client
-        .get(key, Some(GetOptions::new().with_keys_only()))
+        .get(key, None)
         .await
         .map_err(|error| RegistryError::network(format!("etcd lease lookup failed: {error}")))?;
-    let lease_id = response
+    let key_value = response
         .kvs()
         .first()
-        .ok_or_else(|| RegistryError::not_found("etcd key does not exist"))?
-        .lease();
+        .ok_or_else(|| RegistryError::not_found("etcd key does not exist"))?;
+    // etcd 3.7 serves keys-only ranges from its in-memory index and no longer includes
+    // the lease field. An exact bounded read is therefore required to obtain a reliable
+    // association. The value is checked against the existing WebView limit and discarded.
+    EncodedValue::try_from_inline_bytes(key_value.value())?;
+    let lease_id = key_value.lease();
     if lease_id == 0 {
         return Err(RegistryError::unsupported(
             "the selected etcd key is not attached to a lease",
@@ -866,6 +870,20 @@ struct NacosConfigItem {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct NacosConfigDetailWire {
+    data_id: String,
+    #[serde(alias = "group")]
+    group_name: String,
+    #[serde(default, alias = "tenant")]
+    namespace_id: Option<String>,
+    content: String,
+    md5: String,
+    #[serde(default, rename = "type")]
+    content_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct NacosHistoryPageWire {
     #[serde(default)]
     page_number: usize,
@@ -885,13 +903,13 @@ struct NacosHistoryItemWire {
     #[serde(default, alias = "group")]
     group_name: String,
     #[serde(default)]
-    md5: String,
+    md5: Option<String>,
     #[serde(default)]
-    op_type: String,
+    op_type: Option<String>,
     #[serde(default)]
-    src_user: String,
+    src_user: Option<String>,
     #[serde(default)]
-    src_ip: String,
+    src_ip: Option<String>,
     #[serde(default)]
     created_time: serde_json::Value,
     #[serde(default)]
@@ -901,9 +919,9 @@ struct NacosHistoryItemWire {
     #[serde(default)]
     modify_time: serde_json::Value,
     #[serde(default)]
-    publish_type: String,
+    publish_type: Option<String>,
     #[serde(default, rename = "type")]
-    content_type: String,
+    content_type: Option<String>,
     #[serde(default)]
     content: Option<String>,
 }
@@ -1099,16 +1117,7 @@ async fn read_nacos(
         ResourceAddress::NacosConfig { group, data_id } => (group, data_id),
         _ => return Err(adapter_mismatch(AdapterId::Nacos, &address)),
     };
-    let response = session
-        .config
-        .get_config(data_id.clone(), group.clone())
-        .await
-        .map_err(|error| match error {
-            NacosError::ConfigNotFound(_) => {
-                RegistryError::not_found("Nacos config does not exist")
-            }
-            other => RegistryError::network(format!("Nacos config read failed: {other}")),
-        })?;
+    let response = read_nacos_authoritative(session, data_id, group).await?;
     let mut metadata = BTreeMap::new();
     metadata.insert("namespace".to_owned(), response.namespace().clone());
     metadata.insert("group".to_owned(), response.group().clone());
@@ -1122,6 +1131,118 @@ async fn read_nacos(
         version: Some(response.md5().clone()),
         metadata,
     })
+}
+
+pub(super) async fn read_nacos_authoritative(
+    session: &NacosSession,
+    data_id: &str,
+    group: &str,
+) -> Result<nacos_sdk::api::config::ConfigResponse, RegistryError> {
+    let wire = match session.api_version {
+        NacosApiVersion::V2 => {
+            let url = format!(
+                "{}/nacos/v1/cs/configs",
+                nacos_server_base(&session.endpoint)
+            );
+            let response = session
+                .request_auth
+                .apply(session.http.get(url))
+                .query(&[
+                    ("show", "all".to_owned()),
+                    ("dataId", data_id.to_owned()),
+                    ("group", group.to_owned()),
+                    (
+                        "tenant",
+                        public_namespace_for_sdk(&session.namespace).to_owned(),
+                    ),
+                ])
+                .send()
+                .await
+                .map_err(nacos_http_error)?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(RegistryError::not_found("Nacos config does not exist"));
+            }
+            let body = response
+                .error_for_status()
+                .map_err(nacos_http_error)?
+                .bytes()
+                .await
+                .map_err(nacos_http_error)?;
+            if body.is_empty() || body.as_ref() == b"null" {
+                return Err(RegistryError::not_found("Nacos config does not exist"));
+            }
+            serde_json::from_slice::<NacosConfigDetailWire>(&body).map_err(|error| {
+                RegistryError::invalid_response(format!(
+                    "invalid Nacos 2.x config response: {error}"
+                ))
+            })?
+        }
+        NacosApiVersion::V3 => {
+            let url = format!(
+                "{}/nacos/v3/admin/cs/config",
+                nacos_server_base(&session.endpoint)
+            );
+            let response = session
+                .request_auth
+                .apply(session.http.get(url))
+                .query(&[
+                    (
+                        "namespaceId",
+                        public_namespace_for_api(&session.namespace).to_owned(),
+                    ),
+                    ("groupName", group.to_owned()),
+                    ("dataId", data_id.to_owned()),
+                ])
+                .send()
+                .await
+                .map_err(nacos_http_error)?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(RegistryError::not_found("Nacos config does not exist"));
+            }
+            let envelope = response
+                .error_for_status()
+                .map_err(nacos_http_error)?
+                .json::<NacosEnvelope<NacosConfigDetailWire>>()
+                .await
+                .map_err(|error| {
+                    RegistryError::invalid_response(format!(
+                        "invalid Nacos 3.x config response: {}",
+                        error.without_url()
+                    ))
+                })?;
+            if envelope.code == 20004 {
+                return Err(RegistryError::not_found("Nacos config does not exist"));
+            }
+            unwrap_nacos_envelope(envelope, "config read")?
+        }
+    };
+    normalize_nacos_config_detail(wire, data_id, group)
+}
+
+fn normalize_nacos_config_detail(
+    wire: NacosConfigDetailWire,
+    expected_data_id: &str,
+    expected_group: &str,
+) -> Result<nacos_sdk::api::config::ConfigResponse, RegistryError> {
+    if wire.data_id != expected_data_id || wire.group_name != expected_group {
+        return Err(RegistryError::invalid_response(
+            "Nacos config response returned a different configuration identity",
+        ));
+    }
+    if wire.md5.is_empty() {
+        return Err(RegistryError::invalid_response(
+            "Nacos config response has no MD5 version",
+        ));
+    }
+    let content_type = non_empty(wire.content_type).unwrap_or_else(|| "text".to_owned());
+    Ok(nacos_sdk::api::config::ConfigResponse::new(
+        wire.data_id,
+        wire.group_name,
+        wire.namespace_id.unwrap_or_default(),
+        wire.content,
+        content_type,
+        wire.md5,
+    ))
 }
 
 async fn list_nacos_history(
@@ -1361,8 +1482,11 @@ fn json_scalar_string(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn non_empty(value: String) -> Option<String> {
-    (!value.is_empty()).then_some(value)
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let normalized = value.trim();
+        (!normalized.is_empty()).then(|| normalized.to_owned())
+    })
 }
 
 fn unwrap_nacos_envelope<T>(
@@ -1519,7 +1643,7 @@ fn nacos_server_base(endpoint: &str) -> String {
 
 fn nacos_http_error(error: reqwest::Error) -> RegistryError {
     RegistryError::network(format!(
-        "Nacos Admin API request failed: {}",
+        "Nacos HTTP API request failed: {}",
         error.without_url()
     ))
 }
@@ -1533,8 +1657,9 @@ fn adapter_mismatch(adapter: AdapterId, address: &ResourceAddress) -> RegistryEr
 #[cfg(test)]
 mod tests {
     use super::{
-        NacosHistoryPageWire, etcd_cursor_after, etcd_immediate_child, nacos_http_error,
-        normalize_nacos_history_page, normalize_zookeeper_acl, search_zookeeper_children,
+        NacosConfigDetailWire, NacosHistoryPageWire, etcd_cursor_after, etcd_immediate_child,
+        nacos_http_error, normalize_nacos_config_detail, normalize_nacos_history_page,
+        normalize_zookeeper_acl, search_zookeeper_children,
     };
     use crate::registry::ResourceAddress;
 
@@ -1621,6 +1746,70 @@ mod tests {
                 .unwrap()
                 .contains("\"content\"")
         );
+    }
+
+    #[test]
+    fn nacos_v3_history_accepts_nullable_optional_metadata() {
+        let wire: NacosHistoryPageWire = serde_json::from_value(serde_json::json!({
+            "pageNumber": 1,
+            "pagesAvailable": 1,
+            "pageItems": [{
+                "id": "2",
+                "namespaceId": "public",
+                "groupName": "DEFAULT_GROUP",
+                "dataId": "atlas-fixture.yaml",
+                "md5": null,
+                "type": null,
+                "srcUser": null,
+                "srcIp": "127.0.0.1",
+                "opType": "U         ",
+                "createTime": 1272988800000_i64,
+                "modifyTime": 1784100943462_i64,
+                "publishType": "formal"
+            }]
+        }))
+        .expect("Nacos 3.x returns null for optional history metadata");
+        let address = ResourceAddress::NacosConfig {
+            group: "DEFAULT_GROUP".to_owned(),
+            data_id: "atlas-fixture.yaml".to_owned(),
+        };
+
+        let page = normalize_nacos_history_page(wire, address).unwrap();
+        assert_eq!(page.items[0].revision_id, "2");
+        assert_eq!(page.items[0].operation.as_deref(), Some("U"));
+        assert_eq!(page.items[0].md5, None);
+        assert_eq!(page.items[0].content_type, None);
+        assert_eq!(page.items[0].source_user, None);
+    }
+
+    #[test]
+    fn nacos_config_detail_normalizes_v2_and_v3_identity_fields() {
+        let v2: NacosConfigDetailWire = serde_json::from_value(serde_json::json!({
+            "tenant": "",
+            "group": "DEFAULT_GROUP",
+            "dataId": "application.yaml",
+            "content": "version: 2",
+            "md5": "f12193866a8fefcd5b23ed4d98200561",
+            "type": "yaml"
+        }))
+        .unwrap();
+        let v3: NacosConfigDetailWire = serde_json::from_value(serde_json::json!({
+            "namespaceId": "public",
+            "groupName": "DEFAULT_GROUP",
+            "dataId": "application.yaml",
+            "content": "version: 2",
+            "md5": "f12193866a8fefcd5b23ed4d98200561",
+            "type": "yaml"
+        }))
+        .unwrap();
+
+        for wire in [v2, v3] {
+            let response =
+                normalize_nacos_config_detail(wire, "application.yaml", "DEFAULT_GROUP").unwrap();
+            assert_eq!(response.content(), "version: 2");
+            assert_eq!(response.content_type(), "yaml");
+            assert_eq!(response.md5(), "f12193866a8fefcd5b23ed4d98200561");
+        }
     }
 
     #[test]

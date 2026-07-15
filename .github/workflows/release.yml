@@ -1,0 +1,118 @@
+name: Draft desktop release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundles:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    timeout-minutes: 60
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-22.04
+            args: ""
+          - name: Windows x64
+            runner: windows-2025
+            args: ""
+          - name: macOS Apple Silicon
+            runner: macos-15
+            args: "--target aarch64-apple-darwin"
+          - name: macOS Intel
+            runner: macos-15
+            args: "--target x86_64-apple-darwin"
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf protobuf-compiler
+
+      - name: Install macOS protobuf compiler
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install Windows protobuf compiler
+        if: runner.os == 'Windows'
+        run: choco install protoc --no-progress -y
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify release tag matches application version
+        shell: bash
+        run: |
+          expected="v$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          test "$GITHUB_REF_NAME" = "$expected"
+
+      - name: Import Apple Developer certificate
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        shell: bash
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/atlas-release.p12"
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" atlas-release.keychain
+          security default-keychain -s atlas-release.keychain
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" atlas-release.keychain
+          security set-keychain-settings -t 3600 -u atlas-release.keychain
+          security import "$RUNNER_TEMP/atlas-release.p12" -k atlas-release.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" atlas-release.keychain
+          identity="$(security find-identity -v -p codesigning atlas-release.keychain | awk -F'"' '/[0-9]+\)/ {print $2; exit}')"
+          test -n "$identity"
+          echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Configure ad-hoc macOS signing
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE == ''
+        shell: bash
+        run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ env.APPLE_ID }}
+          APPLE_PASSWORD: ${{ env.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ env.APPLE_TEAM_ID }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Atlas Registry v__VERSION__
+          releaseBody: Download the bundle for your platform. This release remains a draft until platform signing and verification are complete.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
