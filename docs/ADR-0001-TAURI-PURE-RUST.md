@@ -27,4 +27,4 @@ Atlas Registry 需要以桌面应用形式统一访问 etcd、ZooKeeper 和 Naco
 
 ## 当前进展
 
-技术 Spike 已结束。正式开发已实现长生命周期 session、可取消的按需浏览、资源读取、1 MiB WebView 大值边界，以及创建、条件更新/删除、冲突反馈、所有写入的连接名二次确认和本地脱敏审计。etcd 与 ZooKeeper 使用服务端原子条件；通用 ZooKeeper create 仅创建继承父 ACL 的持久节点，ephemeral/sequential 留给原生能力入口；Nacos 更新使用 MD5 CAS，创建和删除明确标记为检查后变更。catalog 声明 `probe`、`browse`、`read`、`create`、`update` 和 `delete`。真实服务兼容矩阵仍待在测试环境执行；监听、凭据安全存储与认证属于后续垂直切片。
+技术 Spike 已结束。正式开发已实现长生命周期 session、可取消的按需浏览、资源读取、1 MiB WebView 大值边界，以及创建、条件更新/删除、冲突反馈、所有写入的连接名二次确认和本地脱敏审计。etcd 与 ZooKeeper 使用服务端原子条件；通用 ZooKeeper create 仅创建继承父 ACL 的持久节点，ephemeral/sequential 留给原生能力入口；Nacos 更新使用 MD5 CAS，创建和删除明确标记为检查后变更。连接配置已支持版本迁移，密码与 token 进入系统凭据库；etcd 用户名密码与 mTLS、ZooKeeper digest 与 TLS、Nacos 用户名密码和自定义鉴权上下文已接入原生会话。Nacos 鉴权隔离为独立策略模块，ZooKeeper SASL 仍沿用客户端 `Connector` 作为后续扩展入口，尚未启用具体机制。catalog 声明 `probe`、`browse`、`read`、`create`、`update` 和 `delete`。真实服务兼容矩阵、SASL、监听与发布加固仍待后续切片执行。

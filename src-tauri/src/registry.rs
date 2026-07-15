@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use crate::credentials::ConnectionSecret;
 use adapters::RegistrySession;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -59,6 +60,53 @@ pub enum NacosApiVersion {
     V3,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionEnvironment {
+    #[default]
+    Unspecified,
+    Development,
+    Testing,
+    Staging,
+    Production,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthenticationMode {
+    #[default]
+    None,
+    UsernamePassword,
+    Digest,
+    Custom,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionAuth {
+    #[serde(default)]
+    pub mode: AuthenticationMode,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub custom_key: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsProfile {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub ca_certificate_path: String,
+    #[serde(default)]
+    pub client_certificate_path: String,
+    #[serde(default)]
+    pub client_key_path: String,
+    #[serde(default)]
+    pub server_name: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionProfile {
@@ -70,6 +118,12 @@ pub struct ConnectionProfile {
     pub namespace: String,
     #[serde(default)]
     pub nacos_api_version: NacosApiVersion,
+    #[serde(default)]
+    pub environment: ConnectionEnvironment,
+    #[serde(default)]
+    pub auth: ConnectionAuth,
+    #[serde(default)]
+    pub tls: TlsProfile,
 }
 
 impl ConnectionProfile {
@@ -78,6 +132,12 @@ impl ConnectionProfile {
         self.name = self.name.trim().to_owned();
         self.endpoint = self.endpoint.trim().to_owned();
         self.namespace = self.namespace.trim().to_owned();
+        self.auth.username = self.auth.username.trim().to_owned();
+        self.auth.custom_key = self.auth.custom_key.trim().to_owned();
+        self.tls.ca_certificate_path = self.tls.ca_certificate_path.trim().to_owned();
+        self.tls.client_certificate_path = self.tls.client_certificate_path.trim().to_owned();
+        self.tls.client_key_path = self.tls.client_key_path.trim().to_owned();
+        self.tls.server_name = self.tls.server_name.trim().to_owned();
 
         if self.id.is_empty() {
             return Err(RegistryError::validation("connection id cannot be blank"));
@@ -87,6 +147,49 @@ impl ConnectionProfile {
         }
         if self.endpoint.is_empty() {
             return Err(RegistryError::validation("endpoint cannot be blank"));
+        }
+        match (self.adapter, self.auth.mode) {
+            (_, AuthenticationMode::None) => {}
+            (AdapterId::Etcd | AdapterId::Nacos, AuthenticationMode::UsernamePassword)
+            | (AdapterId::Zookeeper, AuthenticationMode::Digest) => {
+                if self.auth.username.is_empty() {
+                    return Err(RegistryError::validation(
+                        "authenticated connections require a username",
+                    ));
+                }
+            }
+            (AdapterId::Nacos, AuthenticationMode::Custom) => {
+                if self.auth.custom_key.is_empty() {
+                    return Err(RegistryError::validation(
+                        "custom Nacos authentication requires a context key",
+                    ));
+                }
+            }
+            _ => {
+                return Err(RegistryError::validation(
+                    "authentication mode is not supported by this adapter",
+                ));
+            }
+        }
+        let has_client_certificate = !self.tls.client_certificate_path.is_empty();
+        let has_client_key = !self.tls.client_key_path.is_empty();
+        if has_client_certificate != has_client_key {
+            return Err(RegistryError::validation(
+                "TLS client certificate and private key paths must be configured together",
+            ));
+        }
+        if self.tls.enabled
+            && self.adapter == AdapterId::Zookeeper
+            && self.tls.ca_certificate_path.is_empty()
+        {
+            return Err(RegistryError::validation(
+                "ZooKeeper TLS requires a CA certificate path",
+            ));
+        }
+        if self.adapter == AdapterId::Zookeeper && !self.tls.server_name.is_empty() {
+            return Err(RegistryError::validation(
+                "ZooKeeper derives the TLS server name from each endpoint; an override is not supported",
+            ));
         }
         Ok(())
     }
@@ -505,6 +608,9 @@ pub enum RegistryErrorCode {
     PermissionDenied,
     ResourceExhausted,
     AuditIncomplete,
+    CredentialMissing,
+    CredentialStore,
+    TlsConfiguration,
     Storage,
     Cancelled,
 }
@@ -564,6 +670,18 @@ impl RegistryError {
 
     pub(crate) fn resource_exhausted(message: impl Into<String>) -> Self {
         Self::new(RegistryErrorCode::ResourceExhausted, message, true)
+    }
+
+    pub(crate) fn credential_missing(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::CredentialMissing, message, false)
+    }
+
+    pub(crate) fn credential_store(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::CredentialStore, message, true)
+    }
+
+    pub(crate) fn tls_configuration(message: impl Into<String>) -> Self {
+        Self::new(RegistryErrorCode::TlsConfiguration, message, false)
     }
 
     pub(crate) fn timeout(operation: &str) -> Self {
@@ -636,7 +754,23 @@ impl RegistryService {
         let adapter = profile.adapter;
         let endpoint = profile.endpoint.clone();
         self.run_operation(operation_id, async move {
-            RegistrySession::connect(&profile).await?;
+            RegistrySession::connect(&profile, None).await?;
+            Ok(ConnectionProbe { adapter, endpoint })
+        })
+        .await
+    }
+
+    pub async fn probe_with_credentials_cancellable(
+        &self,
+        operation_id: OperationId,
+        mut profile: ConnectionProfile,
+        secret: Option<ConnectionSecret>,
+    ) -> Result<ConnectionProbe, RegistryError> {
+        profile.validate()?;
+        let adapter = profile.adapter;
+        let endpoint = profile.endpoint.clone();
+        self.run_operation(operation_id, async move {
+            RegistrySession::connect(&profile, secret).await?;
             Ok(ConnectionProbe { adapter, endpoint })
         })
         .await
@@ -647,7 +781,16 @@ impl RegistryService {
         mut profile: ConnectionProfile,
     ) -> Result<ConnectionSession, RegistryError> {
         profile.validate()?;
-        let session = RegistrySession::connect(&profile).await?;
+        self.open_with_credentials(profile, None).await
+    }
+
+    pub async fn open_with_credentials(
+        &self,
+        mut profile: ConnectionProfile,
+        secret: Option<ConnectionSecret>,
+    ) -> Result<ConnectionSession, RegistryError> {
+        profile.validate()?;
+        let session = RegistrySession::connect(&profile, secret).await?;
         let summary = ConnectionSession {
             id: profile.id.clone(),
             name: profile.name,
@@ -669,6 +812,19 @@ impl RegistryService {
         let service = self.clone();
         self.run_operation(operation_id, async move { service.open(profile).await })
             .await
+    }
+
+    pub async fn open_with_credentials_cancellable(
+        &self,
+        operation_id: OperationId,
+        profile: ConnectionProfile,
+        secret: Option<ConnectionSecret>,
+    ) -> Result<ConnectionSession, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            service.open_with_credentials(profile, secret).await
+        })
+        .await
     }
 
     pub async fn close(&self, connection_id: &str) -> Result<(), RegistryError> {

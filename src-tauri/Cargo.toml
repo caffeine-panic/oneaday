@@ -12,8 +12,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.22"
 etcd-client = { version = "0.19", features = ["tls-roots"] }
+keyring = "4.1"
 nacos-sdk = { version = "0.8", default-features = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,6 +26,7 @@ tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tonic = "0.14"
 zookeeper-client = { version = "0.11.1", features = ["tokio", "tls"] }
+zeroize = { version = "1.8", features = ["derive"] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

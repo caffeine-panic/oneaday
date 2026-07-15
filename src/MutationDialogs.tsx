@@ -1,3 +1,4 @@
+import { connectionEnvironmentLabels } from "./registry";
 import type {
   AdapterId,
   ConnectionProfile,
@@ -94,7 +95,7 @@ export function MutationConfirmationDialog({
           <button className="icon-button" disabled={busy} onClick={onCancel}>×</button>
         </div>
         <div className="impact-grid">
-          <span>环境</span><b>{profile.name}</b>
+          <span>环境</span><b>{connectionEnvironmentLabels[profile.environment]}</b>
           <span>Endpoint</span><b>{profile.endpoint}</b>
           <span>协议</span><b>{profile.adapter}</b>
           <span>影响范围</span><b>单个资源</b>

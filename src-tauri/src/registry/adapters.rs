@@ -1,20 +1,29 @@
-use std::{collections::BTreeMap, time::Duration};
+mod nacos_auth;
+
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use etcd_client::{GetOptions, SortOrder, SortTarget};
+use etcd_client::{
+    Certificate, ConnectOptions, GetOptions, Identity, SortOrder, SortTarget,
+    TlsOptions as EtcdTlsOptions,
+};
 use nacos_sdk::api::{
     config::{ConfigService, ConfigServiceBuilder},
     error::Error as NacosError,
     props::ClientProps,
 };
 use serde::Deserialize;
+use zeroize::Zeroizing;
+
+use crate::credentials::ConnectionSecret;
 
 use super::{
-    AdapterId, ConnectionProfile, EncodedValue, MutationPhase, MutationResult, NacosApiVersion,
-    RegistryError, RegistryErrorCode, ResourceAddress, ResourceDocument, ResourceMutation,
-    ResourceNode, ResourcePage,
+    AdapterId, AuthenticationMode, ConnectionProfile, EncodedValue, MutationPhase, MutationResult,
+    NacosApiVersion, RegistryError, RegistryErrorCode, ResourceAddress, ResourceDocument,
+    ResourceMutation, ResourceNode, ResourcePage,
     mutations::{mutate_etcd, mutate_nacos, mutate_zookeeper},
 };
+use nacos_auth::NacosRequestAuth;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -32,19 +41,31 @@ pub(super) struct NacosSession {
     endpoint: String,
     namespace: String,
     api_version: NacosApiVersion,
+    request_auth: NacosRequestAuth,
+    _credential: Option<Arc<ConnectionSecret>>,
 }
 
 impl RegistrySession {
-    pub(super) async fn connect(profile: &ConnectionProfile) -> Result<Self, RegistryError> {
+    pub(super) async fn connect(
+        profile: &ConnectionProfile,
+        secret: Option<ConnectionSecret>,
+    ) -> Result<Self, RegistryError> {
         if profile.endpoint.trim().is_empty() {
             return Err(RegistryError::validation("endpoint cannot be blank"));
         }
+        if profile.auth.mode != AuthenticationMode::None && secret.is_none() {
+            return Err(RegistryError::credential_missing(format!(
+                "connection '{}' requires a credential",
+                profile.id
+            )));
+        }
+        let secret = secret.map(Arc::new);
 
         tokio::time::timeout(OPERATION_TIMEOUT, async {
             match profile.adapter {
-                AdapterId::Etcd => Self::connect_etcd(profile).await,
-                AdapterId::Zookeeper => Self::connect_zookeeper(profile).await,
-                AdapterId::Nacos => Self::connect_nacos(profile).await,
+                AdapterId::Etcd => Self::connect_etcd(profile, secret.as_deref()).await,
+                AdapterId::Zookeeper => Self::connect_zookeeper(profile, secret.as_deref()).await,
+                AdapterId::Nacos => Self::connect_nacos(profile, secret).await,
             }
         })
         .await
@@ -102,14 +123,30 @@ impl RegistrySession {
         .map_err(|_| timeout_phase.timeout_error())?
     }
 
-    async fn connect_etcd(profile: &ConnectionProfile) -> Result<Self, RegistryError> {
+    async fn connect_etcd(
+        profile: &ConnectionProfile,
+        secret: Option<&ConnectionSecret>,
+    ) -> Result<Self, RegistryError> {
         let endpoints = profile
             .endpoint
             .split(',')
             .map(str::trim)
             .filter(|endpoint| !endpoint.is_empty())
+            .map(|endpoint| etcd_endpoint(endpoint, profile.tls.enabled))
             .collect::<Vec<_>>();
-        let mut client = etcd_client::Client::connect(endpoints, None)
+        let mut options = ConnectOptions::default()
+            .with_connect_timeout(OPERATION_TIMEOUT)
+            .with_timeout(OPERATION_TIMEOUT);
+        if profile.auth.mode == AuthenticationMode::UsernamePassword {
+            options = options.with_user(
+                profile.auth.username.clone(),
+                required_secret(profile, secret)?.expose().to_owned(),
+            );
+        }
+        if profile.tls.enabled {
+            options = options.with_tls(etcd_tls_options(profile).await?);
+        }
+        let mut client = etcd_client::Client::connect(endpoints, Some(options))
             .await
             .map_err(|error| RegistryError::network(format!("etcd connection failed: {error}")))?;
         client.status().await.map_err(|error| {
@@ -118,26 +155,59 @@ impl RegistrySession {
         Ok(Self::Etcd(Box::new(client)))
     }
 
-    async fn connect_zookeeper(profile: &ConnectionProfile) -> Result<Self, RegistryError> {
-        zookeeper_client::Client::connect(&profile.endpoint)
-            .await
-            .map(Self::Zookeeper)
-            .map_err(|error| {
-                RegistryError::network(format!("ZooKeeper connection failed: {error}"))
-            })
+    async fn connect_zookeeper(
+        profile: &ConnectionProfile,
+        secret: Option<&ConnectionSecret>,
+    ) -> Result<Self, RegistryError> {
+        let mut connector = zookeeper_client::Client::connector();
+        let digest = if profile.auth.mode == AuthenticationMode::Digest {
+            Some(Zeroizing::new(format!(
+                "{}:{}",
+                profile.auth.username,
+                required_secret(profile, secret)?.expose()
+            )))
+        } else {
+            None
+        };
+        if let Some(digest) = digest.as_ref() {
+            connector = connector.with_auth("digest", digest.as_bytes());
+        }
+        if profile.tls.enabled {
+            connector = connector.with_tls(zookeeper_tls_options(profile).await?);
+        }
+        let connection = if profile.tls.enabled {
+            connector.secure_connect(&profile.endpoint).await
+        } else {
+            connector.connect(&profile.endpoint).await
+        };
+        connection.map(Self::Zookeeper).map_err(|error| {
+            RegistryError::network(format!("ZooKeeper connection failed: {error}"))
+        })
     }
 
-    async fn connect_nacos(profile: &ConnectionProfile) -> Result<Self, RegistryError> {
+    async fn connect_nacos(
+        profile: &ConnectionProfile,
+        secret: Option<Arc<ConnectionSecret>>,
+    ) -> Result<Self, RegistryError> {
         let sdk_namespace = public_namespace_for_sdk(&profile.namespace);
-        let config = ConfigServiceBuilder::new(
+        let http = reqwest::Client::builder()
+            .timeout(OPERATION_TIMEOUT)
+            .build()
+            .map_err(|error| {
+                RegistryError::invalid_response(format!("cannot build Nacos HTTP client: {error}"))
+            })?;
+        let builder = ConfigServiceBuilder::new(
             ClientProps::new()
                 .server_addr(&profile.endpoint)
                 .namespace(sdk_namespace)
                 .app_name("atlas-registry"),
-        )
-        .build()
-        .await
-        .map_err(|error| RegistryError::network(format!("Nacos connection failed: {error}")))?;
+        );
+        let (builder, request_auth) =
+            nacos_auth::configure(builder, http.clone(), profile, secret.as_ref())?;
+        let config = builder
+            .build()
+            .await
+            .map_err(|error| RegistryError::network(format!("Nacos connection failed: {error}")))?;
 
         match config
             .get_config(
@@ -154,21 +224,96 @@ impl RegistrySession {
             }
         }
 
-        let http = reqwest::Client::builder()
-            .timeout(OPERATION_TIMEOUT)
-            .build()
-            .map_err(|error| {
-                RegistryError::invalid_response(format!("cannot build Nacos HTTP client: {error}"))
-            })?;
-
         Ok(Self::Nacos(NacosSession {
             config,
             http,
             endpoint: profile.endpoint.clone(),
             namespace: profile.namespace.clone(),
             api_version: profile.nacos_api_version,
+            request_auth,
+            _credential: secret,
         }))
     }
+}
+
+fn required_secret<'a>(
+    profile: &ConnectionProfile,
+    secret: Option<&'a ConnectionSecret>,
+) -> Result<&'a ConnectionSecret, RegistryError> {
+    secret.ok_or_else(|| {
+        RegistryError::credential_missing(format!(
+            "connection '{}' requires a credential",
+            profile.id
+        ))
+    })
+}
+
+fn etcd_endpoint(endpoint: &str, tls: bool) -> String {
+    if tls && !endpoint.contains("://") {
+        format!("https://{endpoint}")
+    } else {
+        endpoint.to_owned()
+    }
+}
+
+async fn etcd_tls_options(profile: &ConnectionProfile) -> Result<EtcdTlsOptions, RegistryError> {
+    let mut options = EtcdTlsOptions::new().with_enabled_roots();
+    if !profile.tls.ca_certificate_path.is_empty() {
+        let ca = read_tls_file(&profile.tls.ca_certificate_path, "CA certificate").await?;
+        options = options.ca_certificate(Certificate::from_pem(ca));
+    }
+    if !profile.tls.client_certificate_path.is_empty() {
+        let certificate =
+            read_tls_file(&profile.tls.client_certificate_path, "client certificate").await?;
+        let private_key = Zeroizing::new(
+            read_tls_file(&profile.tls.client_key_path, "client private key").await?,
+        );
+        options = options.identity(Identity::from_pem(certificate, private_key.as_slice()));
+    }
+    if !profile.tls.server_name.is_empty() {
+        options = options.domain_name(profile.tls.server_name.clone());
+    }
+    Ok(options)
+}
+
+async fn zookeeper_tls_options(
+    profile: &ConnectionProfile,
+) -> Result<zookeeper_client::TlsOptions, RegistryError> {
+    let ca = read_tls_text(&profile.tls.ca_certificate_path, "CA certificate").await?;
+    let mut options = zookeeper_client::TlsOptions::new()
+        .with_pem_ca(&ca)
+        .map_err(|error| {
+            RegistryError::tls_configuration(format!(
+                "ZooKeeper CA certificate is invalid: {error}"
+            ))
+        })?;
+    if !profile.tls.client_certificate_path.is_empty() {
+        let certificate =
+            read_tls_text(&profile.tls.client_certificate_path, "client certificate").await?;
+        let private_key = Zeroizing::new(
+            read_tls_text(&profile.tls.client_key_path, "client private key").await?,
+        );
+        options = options
+            .with_pem_identity(&certificate, private_key.as_str())
+            .map_err(|error| {
+                RegistryError::tls_configuration(format!(
+                    "ZooKeeper client identity is invalid: {error}"
+                ))
+            })?;
+    }
+    Ok(options)
+}
+
+async fn read_tls_file(path: &str, label: &str) -> Result<Vec<u8>, RegistryError> {
+    tokio::fs::read(path).await.map_err(|error| {
+        RegistryError::tls_configuration(format!("cannot read TLS {label} at '{path}': {error}"))
+    })
+}
+
+async fn read_tls_text(path: &str, label: &str) -> Result<String, RegistryError> {
+    tokio::fs::read_to_string(path).await.map_err(|error| {
+        RegistryError::tls_configuration(format!("cannot read TLS {label} at '{path}': {error}"))
+    })
 }
 
 #[derive(Default)]
@@ -459,8 +604,8 @@ async fn fetch_nacos_v2_page(
         nacos_server_base(&session.endpoint)
     );
     session
-        .http
-        .get(url)
+        .request_auth
+        .apply(session.http.get(url))
         .query(&[
             ("search", "blur".to_owned()),
             ("dataId", String::new()),
@@ -480,7 +625,10 @@ async fn fetch_nacos_v2_page(
         .json::<NacosConfigPage>()
         .await
         .map_err(|error| {
-            RegistryError::invalid_response(format!("invalid Nacos 2.x list response: {error}"))
+            RegistryError::invalid_response(format!(
+                "invalid Nacos 2.x list response: {}",
+                error.without_url()
+            ))
         })
 }
 
@@ -494,8 +642,8 @@ async fn fetch_nacos_v3_page(
         nacos_server_base(&session.endpoint)
     );
     let envelope = session
-        .http
-        .get(url)
+        .request_auth
+        .apply(session.http.get(url))
         .query(&[
             ("pageNo", page_number.to_string()),
             ("pageSize", limit.to_string()),
@@ -516,7 +664,10 @@ async fn fetch_nacos_v3_page(
         .json::<NacosEnvelope<NacosConfigPage>>()
         .await
         .map_err(|error| {
-            RegistryError::invalid_response(format!("invalid Nacos 3.x list response: {error}"))
+            RegistryError::invalid_response(format!(
+                "invalid Nacos 3.x list response: {}",
+                error.without_url()
+            ))
         })?;
     if envelope.code != 0 && envelope.code != 200 {
         return Err(RegistryError::new(
@@ -700,7 +851,10 @@ fn nacos_server_base(endpoint: &str) -> String {
 }
 
 fn nacos_http_error(error: reqwest::Error) -> RegistryError {
-    RegistryError::network(format!("Nacos Admin API request failed: {error}"))
+    RegistryError::network(format!(
+        "Nacos Admin API request failed: {}",
+        error.without_url()
+    ))
 }
 
 fn adapter_mismatch(adapter: AdapterId, address: &ResourceAddress) -> RegistryError {
@@ -711,7 +865,7 @@ fn adapter_mismatch(adapter: AdapterId, address: &ResourceAddress) -> RegistryEr
 
 #[cfg(test)]
 mod tests {
-    use super::{etcd_cursor_after, etcd_immediate_child};
+    use super::{etcd_cursor_after, etcd_immediate_child, nacos_http_error};
 
     #[test]
     fn etcd_cursor_keeps_exact_keys_and_folder_prefixes_in_separate_ranges() {
@@ -725,5 +879,18 @@ mod tests {
         assert!(etcd_cursor_after(&exact.0, exact.2) < dotted.0);
         assert!(etcd_cursor_after(&dotted.0, dotted.2) < b"a/x".to_vec());
         assert!(etcd_cursor_after(&nested.0, nested.2) > b"a/x".to_vec());
+    }
+
+    #[tokio::test]
+    async fn nacos_http_errors_never_return_secret_query_parameters() {
+        let error = reqwest::Client::new()
+            .get("http://[::1/nacos/v1/cs/configs?accessToken=TOP_SECRET_TOKEN")
+            .send()
+            .await
+            .expect_err("invalid URL should reject the request before network access");
+
+        let sanitized = nacos_http_error(error);
+        assert!(!sanitized.message.contains("TOP_SECRET_TOKEN"));
+        assert!(!sanitized.message.contains("accessToken"));
     }
 }

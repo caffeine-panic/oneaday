@@ -4,10 +4,13 @@ import {
   NewResourceDialog,
   type NewResourceDraft,
 } from "./MutationDialogs";
+import { ConnectionDialog, type ConnectionDialogMode } from "./ConnectionDialog";
 import {
   ROOT_ADDRESS,
   cancelOperation,
   closeConnection,
+  connectionEnvironmentLabels,
+  deleteConnectionProfile,
   errorMessage,
   isCancelled,
   isOutcomeUnknown,
@@ -19,7 +22,7 @@ import {
   probeConnection,
   readResource,
   registryCapabilities,
-  saveConnectionProfiles,
+  upsertConnectionProfile,
   type AdapterDescriptor,
   type AdapterId,
   type ConnectionProfile,
@@ -53,13 +56,16 @@ const emptyForm = (): ConnectionProfile => ({
   endpoint: "127.0.0.1:2379",
   namespace: "",
   nacosApiVersion: "v2",
+  environment: "unspecified",
+  auth: { mode: "none", username: "", customKey: "" },
+  tls: {
+    enabled: false,
+    caCertificatePath: "",
+    clientCertificatePath: "",
+    clientKeyPath: "",
+    serverName: "",
+  },
 });
-
-const endpointPlaceholders: Record<AdapterId, string> = {
-  etcd: "127.0.0.1:2379 或 etcd-1:2379,etcd-2:2379",
-  zookeeper: "127.0.0.1:2181 或 zk-1:2181,zk-2:2181/app",
-  nacos: "127.0.0.1:8848",
-};
 
 const emptyResourceDraft = (adapter: AdapterId): NewResourceDraft => ({
   keyOrPath: adapter === "zookeeper" ? "/" : "",
@@ -97,6 +103,18 @@ function normalizedProfile(profile: ConnectionProfile): ConnectionProfile {
     name: profile.name.trim(),
     endpoint: profile.endpoint.trim(),
     namespace: profile.namespace.trim(),
+    auth: {
+      ...profile.auth,
+      username: profile.auth.username.trim(),
+      customKey: profile.auth.customKey.trim(),
+    },
+    tls: {
+      ...profile.tls,
+      caCertificatePath: profile.tls.caCertificatePath.trim(),
+      clientCertificatePath: profile.tls.clientCertificatePath.trim(),
+      clientKeyPath: profile.tls.clientKeyPath.trim(),
+      serverName: profile.tls.serverName.trim(),
+    },
   };
 }
 
@@ -136,8 +154,10 @@ export function App() {
   const [activeOperation, setActiveOperation] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogMode, setDialogMode] = useState<ConnectionDialogMode>("new");
   const [testingConnection, setTestingConnection] = useState(false);
   const [form, setForm] = useState<ConnectionProfile>(emptyForm);
+  const [connectionSecret, setConnectionSecret] = useState("");
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [resourceDraft, setResourceDraft] = useState<NewResourceDraft>(() => emptyResourceDraft("etcd"));
   const [pendingMutation, setPendingMutation] = useState<ResourceMutation>();
@@ -214,7 +234,7 @@ export function App() {
     }
   };
 
-  const connectAndLoad = async (profile: ConnectionProfile) => {
+  const connectAndLoad = async (profile: ConnectionProfile, transientSecret?: string) => {
     setBusy(true);
     setMessage(undefined);
     showDocument(undefined);
@@ -223,7 +243,7 @@ export function App() {
       const operationId = startOperation();
       let session: ConnectionSession;
       try {
-        session = await openConnection(profile, operationId);
+        session = await openConnection(profile, operationId, transientSecret);
       } finally {
         finishOperation(operationId);
       }
@@ -246,12 +266,21 @@ export function App() {
       setMessage("连接名称和 endpoint 不能为空");
       return;
     }
-    const nextProfiles = [...profiles.filter((item) => item.id !== candidate.id), candidate];
+    if (candidate.auth.mode !== "none" && dialogMode !== "edit" && !connectionSecret) {
+      setMessage("新连接启用认证时必须填写密钥");
+      return;
+    }
     try {
-      await saveConnectionProfiles(nextProfiles);
+      const credentialUpdate = candidate.auth.mode === "none"
+        ? { operation: "clear" as const }
+        : connectionSecret
+          ? { operation: "replace" as const, secret: connectionSecret }
+          : { operation: "preserve" as const };
+      const nextProfiles = await upsertConnectionProfile(candidate, credentialUpdate);
       setProfiles(nextProfiles);
       setDialogOpen(false);
-      await connectAndLoad(candidate);
+      await connectAndLoad(candidate, connectionSecret || undefined);
+      setConnectionSecret("");
     } catch (reason) {
       setMessage(errorMessage(reason));
     }
@@ -268,7 +297,7 @@ export function App() {
     setMessage(undefined);
     const operationId = startOperation();
     try {
-      const result = await probeConnection(candidate, operationId);
+      const result = await probeConnection(candidate, operationId, connectionSecret || undefined);
       setMessage(`连接测试成功：${result.endpoint}`);
     } catch (reason) {
       setMessage(isCancelled(reason) ? "连接测试已取消" : errorMessage(reason));
@@ -537,8 +566,65 @@ export function App() {
   };
 
   const openNewConnection = () => {
+    setDialogMode("new");
     setForm(emptyForm());
+    setConnectionSecret("");
     setDialogOpen(true);
+  };
+
+  const openEditConnection = () => {
+    if (!selectedProfile) return;
+    setDialogMode("edit");
+    setForm(structuredClone(selectedProfile));
+    setConnectionSecret("");
+    setDialogOpen(true);
+  };
+
+  const openCopyConnection = () => {
+    if (!selectedProfile) return;
+    setDialogMode("copy");
+    setForm({
+      ...structuredClone(selectedProfile),
+      id: newConnectionId(),
+      name: `${selectedProfile.name} 副本`,
+    });
+    setConnectionSecret("");
+    setDialogOpen(true);
+  };
+
+  const deleteCurrentConnection = async () => {
+    if (dialogMode !== "edit") return;
+    if (!globalThis.confirm(`确定删除连接“${form.name}”吗？系统凭据也会一并删除。`)) return;
+    setBusy(true);
+    try {
+      if (sessions[form.id]) {
+        try {
+          await closeConnection(form.id);
+        } catch {
+          // Missing and already-closed sessions have the same local outcome.
+        }
+      }
+      const nextProfiles = await deleteConnectionProfile(form.id);
+      setProfiles(nextProfiles);
+      setSessions((current) => {
+        const next = { ...current };
+        delete next[form.id];
+        return next;
+      });
+      if (selectedId === form.id) {
+        setSelectedId(undefined);
+        setRows([]);
+        showDocument(undefined);
+        setSelectedAddress(undefined);
+      }
+      setDialogOpen(false);
+      setConnectionSecret("");
+      setMessage("连接和系统凭据已删除");
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -570,7 +656,7 @@ export function App() {
               onClick={() => void selectProfile(profile)}
             >
               <span className={`status-dot ${sessions[profile.id] ? "" : "offline"}`} />
-              <span><b>{profile.name}</b><small>{profile.endpoint}</small></span>
+              <span><b>{profile.name}</b><small>{profile.endpoint} · {connectionEnvironmentLabels[profile.environment]}</small></span>
               <span className={`badge ${profile.adapter}`}>{connectionLabel(profile.adapter)}</span>
             </button>
           ))}
@@ -582,6 +668,12 @@ export function App() {
           )}
           {selectedSession && (
             <button className="button wide" onClick={() => void disconnect()}>断开连接</button>
+          )}
+          {selectedProfile && (
+            <div className="connection-actions">
+              <button className="button" disabled={busy} onClick={openEditConnection}>编辑</button>
+              <button className="button" disabled={busy} onClick={openCopyConnection}>复制</button>
+            </div>
           )}
           <button className="button wide" onClick={openNewConnection}>＋ 添加连接</button>
 
@@ -679,35 +771,20 @@ export function App() {
       {message && <button className="toast" onClick={() => setMessage(undefined)}>{message}</button>}
 
       {dialogOpen && (
-        <div className="dialog-backdrop" onMouseDown={() => { if (!testingConnection) setDialogOpen(false); }}>
-          <section className="dialog" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="dialog-heading"><div><span className="eyebrow">CONNECTION</span><h2>新建连接</h2></div><button className="icon-button" disabled={testingConnection} onClick={() => setDialogOpen(false)}>×</button></div>
-            <label>类型
-              <select value={form.adapter} onChange={(event) => {
-                const adapter = event.target.value as AdapterId;
-                setForm((current) => ({ ...current, adapter, endpoint: endpointPlaceholders[adapter].split(" ")[0] }));
-              }}>
-                <option value="etcd">etcd</option>
-                <option value="zookeeper">ZooKeeper</option>
-                <option value="nacos">Nacos</option>
-              </select>
-            </label>
-            <label>名称<input autoFocus value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：生产配置中心" /></label>
-            <label>Endpoint<input value={form.endpoint} onChange={(event) => setForm({ ...form, endpoint: event.target.value })} placeholder={endpointPlaceholders[form.adapter]} /></label>
-            {form.adapter === "nacos" && (
-              <div className="form-grid">
-                <label>Namespace<input value={form.namespace} onChange={(event) => setForm({ ...form, namespace: event.target.value })} placeholder="public" /></label>
-                <label>Admin API<select value={form.nacosApiVersion} onChange={(event) => setForm({ ...form, nacosApiVersion: event.target.value as "v2" | "v3" })}><option value="v2">Nacos 2.x</option><option value="v3">Nacos 3.x</option></select></label>
-              </div>
-            )}
-            <p className="form-note">当前切片支持无认证连接。凭据与 TLS 将进入系统安全存储，不会写入浏览器 localStorage。</p>
-            <div className="dialog-actions">
-              <button className="button" onClick={() => testingConnection ? void cancelActiveOperation() : setDialogOpen(false)}>{testingConnection ? "取消测试" : "取消"}</button>
-              <button className="button" disabled={busy} onClick={() => void testConnection()}>测试连接</button>
-              <button className="button primary" disabled={busy} onClick={() => void saveAndConnect()}>保存并连接</button>
-            </div>
-          </section>
-        </div>
+        <ConnectionDialog
+          mode={dialogMode}
+          form={form}
+          secret={connectionSecret}
+          busy={busy}
+          testing={testingConnection}
+          onChange={setForm}
+          onSecretChange={setConnectionSecret}
+          onCancel={() => setDialogOpen(false)}
+          onTest={() => void testConnection()}
+          onSave={() => void saveAndConnect()}
+          onDelete={() => void deleteCurrentConnection()}
+          onCancelOperation={() => void cancelActiveOperation()}
+        />
       )}
 
       {createDialogOpen && selectedProfile && (

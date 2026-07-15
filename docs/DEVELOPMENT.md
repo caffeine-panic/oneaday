@@ -30,6 +30,22 @@ ATLAS_TEST_NACOS_NAMESPACE=public
 
 默认情况下这些测试只执行连接、读取与列表操作，不会写入测试集群。
 
+认证测试可按协议提供 `ATLAS_TEST_<PROTOCOL>_USERNAME` 与
+`ATLAS_TEST_<PROTOCOL>_PASSWORD`（`PROTOCOL` 为 `ETCD`、`ZOOKEEPER` 或
+`NACOS`）。ZooKeeper 会使用 digest，其余两种协议使用用户名密码。etcd 与
+ZooKeeper 的 TLS/mTLS 通过以下变量启用；测试代码只读取文件内容，不输出密钥：
+
+```bash
+ATLAS_TEST_ETCD_TLS=1 \
+ATLAS_TEST_ETCD_TLS_CA=/path/to/ca.pem \
+ATLAS_TEST_ETCD_TLS_CERT=/path/to/client.pem \
+ATLAS_TEST_ETCD_TLS_KEY=/path/to/client-key.pem \
+ATLAS_TEST_ETCD_TLS_SERVER_NAME=etcd.internal
+```
+
+将变量前缀替换为 `ATLAS_TEST_ZOOKEEPER` 即可验证 ZooKeeper TLS；ZooKeeper
+必须提供 CA，且不支持单独覆盖 server name。
+
 若要同时验证读取与元数据，提供已有的只读 fixture：
 
 ```bash

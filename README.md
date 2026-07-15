@@ -34,9 +34,9 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## 当前开发边界
 
-- 已实现：方案 A 的 React 页面、Tauri 工程、Rust 侧非敏感连接配置持久化、长生命周期会话、三协议真实连接、可取消的分页/懒加载浏览、资源读取、结构化错误、二进制安全展示、1 MiB 大值保护，以及带版本校验、连接名二次确认、影响预览和脱敏审计的创建/更新/删除链路。
+- 已实现：方案 A 的 React 页面、Tauri 工程、连接的新建/编辑/复制/删除/测试、非敏感配置迁移、系统凭据库、etcd 用户名密码与 mTLS、ZooKeeper digest 与 TLS、Nacos 用户名密码与自定义鉴权上下文、长生命周期会话、三协议真实连接、可取消的分页/懒加载浏览、资源读取、结构化错误、二进制安全展示、1 MiB 大值保护，以及带版本校验、连接名二次确认、影响预览和脱敏审计的创建/更新/删除链路。
 - 当前 ZooKeeper 通用 create 明确限定为继承父 ACL 的持久节点；ephemeral/sequential 创建留在后续 ZooKeeper 原生能力入口，不伪装为通用资源创建。
-- 正在推进：连接编辑与凭据安全存储、认证/TLS、直接定位、事件监听和生产发布加固。
+- 正在推进：ZooKeeper SASL 扩展、直接定位、搜索、事件监听、导入导出和生产发布加固。
 - adapter 只统一连接与资源操作外形；etcd lease/transaction、ZooKeeper ACL/ephemeral、Nacos namespace/service 保留各自语义。
 
 完整产品范围与验收口径见 [docs/PRODUCT_REQUIREMENTS.md](docs/PRODUCT_REQUIREMENTS.md)。

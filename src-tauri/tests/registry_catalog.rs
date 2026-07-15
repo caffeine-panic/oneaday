@@ -1,7 +1,8 @@
 use atlas_registry_lib::registry::{
-    AdapterId, AdapterStatus, Capability, ConnectionProfile, EncodedValue, MutationValue,
-    NacosApiVersion, OperationId, RegistryCatalog, RegistryErrorCode, RegistryService,
-    ResourceAddress, ResourceMutation, ResourceSnapshot, ValueEncoding,
+    AdapterId, AdapterStatus, AuthenticationMode, Capability, ConnectionAuth, ConnectionProfile,
+    EncodedValue, MutationValue, NacosApiVersion, OperationId, RegistryCatalog, RegistryErrorCode,
+    RegistryService, ResourceAddress, ResourceMutation, ResourceSnapshot, TlsProfile,
+    ValueEncoding,
 };
 
 #[test]
@@ -174,10 +175,60 @@ fn connection_probe_rejects_a_blank_endpoint_before_using_a_protocol_client() {
             endpoint: "   ".to_owned(),
             namespace: String::new(),
             nacos_api_version: NacosApiVersion::V2,
+            environment: Default::default(),
+            auth: Default::default(),
+            tls: Default::default(),
         },
     ))
     .expect_err("a blank endpoint must be rejected");
 
     assert_eq!(error.code, RegistryErrorCode::Validation);
     assert_eq!(error.message, "endpoint cannot be blank");
+}
+
+#[test]
+fn authenticated_probe_requires_a_secret_before_using_a_protocol_client() {
+    let error = tauri::async_runtime::block_on(
+        RegistryService::default().probe_with_credentials_cancellable(
+            OperationId::new("missing-credential-probe".to_owned())
+                .expect("operation id should be valid"),
+            ConnectionProfile {
+                id: "secured-etcd".to_owned(),
+                name: "Secured etcd".to_owned(),
+                adapter: AdapterId::Etcd,
+                endpoint: "127.0.0.1:2379".to_owned(),
+                namespace: String::new(),
+                nacos_api_version: NacosApiVersion::V2,
+                environment: Default::default(),
+                auth: ConnectionAuth {
+                    mode: AuthenticationMode::UsernamePassword,
+                    username: "operator".to_owned(),
+                    custom_key: String::new(),
+                },
+                tls: Default::default(),
+            },
+            None,
+        ),
+    )
+    .expect_err("authenticated probes must not fall back to anonymous access");
+
+    assert_eq!(error.code, RegistryErrorCode::CredentialMissing);
+}
+
+#[test]
+fn legacy_connection_profiles_gain_safe_authentication_and_tls_defaults() {
+    let profile = serde_json::from_value::<ConnectionProfile>(serde_json::json!({
+        "id": "legacy-etcd",
+        "name": "Legacy etcd",
+        "adapter": "etcd",
+        "endpoint": "127.0.0.1:2379",
+        "namespace": "",
+        "nacosApiVersion": "v2"
+    }))
+    .expect("version 1 profiles should migrate through serde defaults");
+
+    assert_eq!(profile.auth, ConnectionAuth::default());
+    assert_eq!(profile.auth.mode, AuthenticationMode::None);
+    assert_eq!(profile.tls, TlsProfile::default());
+    assert!(!profile.tls.enabled);
 }

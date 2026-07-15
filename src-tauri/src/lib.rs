@@ -1,4 +1,6 @@
 pub mod audit;
+pub mod connections;
+pub mod credentials;
 pub mod registry;
 
 use registry::{
@@ -6,8 +8,11 @@ use registry::{
     MutationResult, OperationId, RegistryCatalog, RegistryError, RegistryService, ResourceAddress,
     ResourceDocument, ResourceMutation, ResourcePage, ResourcePageRequest,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
+
+use connections::ConnectionStore;
+use credentials::{CredentialUpdate, CredentialVault, TransientCredential};
 
 #[tauri::command]
 fn registry_capabilities() -> Vec<AdapterDescriptor> {
@@ -17,80 +22,48 @@ fn registry_capabilities() -> Vec<AdapterDescriptor> {
 #[tauri::command]
 async fn probe_connection(
     service: State<'_, RegistryService>,
+    credentials: State<'_, CredentialVault>,
     profile: ConnectionProfile,
     operation_id: String,
+    transient_credential: Option<TransientCredential>,
 ) -> Result<ConnectionProbe, RegistryError> {
+    let secret = credentials.resolve(&profile, transient_credential).await?;
     service
-        .probe_cancellable(OperationId::new(operation_id)?, profile)
+        .probe_with_credentials_cancellable(OperationId::new(operation_id)?, profile, secret)
         .await
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredConnectionProfiles {
-    version: u32,
-    profiles: Vec<ConnectionProfile>,
 }
 
 #[tauri::command]
 async fn load_connection_profiles<R: tauri::Runtime>(
     app: AppHandle<R>,
+    credentials: State<'_, CredentialVault>,
 ) -> Result<Vec<ConnectionProfile>, RegistryError> {
-    let path = connection_profiles_path(&app)?;
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(RegistryError::storage(format!(
-                "cannot read connection profiles: {error}"
-            )));
-        }
-    };
-    let mut stored =
-        serde_json::from_slice::<StoredConnectionProfiles>(&bytes).map_err(|error| {
-            RegistryError::storage(format!("connection profile file is invalid: {error}"))
-        })?;
-    if stored.version != 1 {
-        return Err(RegistryError::storage(format!(
-            "unsupported connection profile version {}",
-            stored.version
-        )));
-    }
-    for profile in &mut stored.profiles {
-        profile.validate()?;
-    }
-    Ok(stored.profiles)
+    ConnectionStore::new(connection_profiles_path(&app)?, credentials.inner().clone())
+        .load()
+        .await
 }
 
 #[tauri::command]
-async fn save_connection_profiles<R: tauri::Runtime>(
+async fn upsert_connection_profile<R: tauri::Runtime>(
     app: AppHandle<R>,
-    mut profiles: Vec<ConnectionProfile>,
-) -> Result<(), RegistryError> {
-    for profile in &mut profiles {
-        profile.validate()?;
-    }
-    let path = connection_profiles_path(&app)?;
-    let directory = path
-        .parent()
-        .ok_or_else(|| RegistryError::storage("connection profile path has no parent"))?;
-    tokio::fs::create_dir_all(directory)
+    credentials: State<'_, CredentialVault>,
+    profile: ConnectionProfile,
+    credential_update: CredentialUpdate,
+) -> Result<Vec<ConnectionProfile>, RegistryError> {
+    ConnectionStore::new(connection_profiles_path(&app)?, credentials.inner().clone())
+        .upsert(profile, credential_update)
         .await
-        .map_err(|error| {
-            RegistryError::storage(format!(
-                "cannot create application config directory: {error}"
-            ))
-        })?;
-    let bytes = serde_json::to_vec_pretty(&StoredConnectionProfiles {
-        version: 1,
-        profiles,
-    })
-    .map_err(|error| {
-        RegistryError::storage(format!("cannot serialize connection profiles: {error}"))
-    })?;
-    tokio::fs::write(path, bytes).await.map_err(|error| {
-        RegistryError::storage(format!("cannot save connection profiles: {error}"))
-    })
+}
+
+#[tauri::command]
+async fn delete_connection_profile<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    credentials: State<'_, CredentialVault>,
+    connection_id: String,
+) -> Result<Vec<ConnectionProfile>, RegistryError> {
+    ConnectionStore::new(connection_profiles_path(&app)?, credentials.inner().clone())
+        .delete(&connection_id)
+        .await
 }
 
 fn connection_profiles_path<R: tauri::Runtime>(
@@ -112,11 +85,14 @@ fn app_config_directory<R: tauri::Runtime>(
 #[tauri::command]
 async fn open_connection(
     service: State<'_, RegistryService>,
+    credentials: State<'_, CredentialVault>,
     profile: ConnectionProfile,
     operation_id: String,
+    transient_credential: Option<TransientCredential>,
 ) -> Result<ConnectionSession, RegistryError> {
+    let secret = credentials.resolve(&profile, transient_credential).await?;
     service
-        .open_cancellable(OperationId::new(operation_id)?, profile)
+        .open_with_credentials_cancellable(OperationId::new(operation_id)?, profile, secret)
         .await
 }
 
@@ -290,11 +266,13 @@ fn configured_builder<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::B
     builder
         .manage(RegistryService::default())
         .manage(audit::AuditLog::default())
+        .manage(CredentialVault::system())
         .invoke_handler(tauri::generate_handler![
             registry_capabilities,
             probe_connection,
             load_connection_profiles,
-            save_connection_profiles,
+            upsert_connection_profile,
+            delete_connection_profile,
             open_connection,
             close_connection,
             list_resources,
@@ -353,6 +331,35 @@ mod command_tests {
         )
         .expect_err("root mutation should be rejected");
         assert_eq!(error["code"], "validation");
+
+        let connection_error = test::get_ipc_response(
+            &webview,
+            request(
+                "upsert_connection_profile",
+                json!({
+                    "profile": {
+                        "id": "",
+                        "name": "Invalid",
+                        "adapter": "etcd",
+                        "endpoint": "127.0.0.1:2379",
+                        "namespace": "",
+                        "nacosApiVersion": "v2",
+                        "environment": "unspecified",
+                        "auth": { "mode": "none", "username": "", "customKey": "" },
+                        "tls": {
+                            "enabled": false,
+                            "caCertificatePath": "",
+                            "clientCertificatePath": "",
+                            "clientKeyPath": "",
+                            "serverName": ""
+                        }
+                    },
+                    "credentialUpdate": { "operation": "preserve" }
+                }),
+            ),
+        )
+        .expect_err("invalid connection command should be rejected");
+        assert_eq!(connection_error["code"], "validation");
     }
 
     fn request(command: &str, body: Value) -> InvokeRequest {

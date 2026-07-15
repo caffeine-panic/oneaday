@@ -1,6 +1,10 @@
-use atlas_registry_lib::registry::{
-    AdapterId, ConnectionProfile, MutationValue, NacosApiVersion, RegistryService, ResourceAddress,
-    ResourceMutation, ValueEncoding,
+use atlas_registry_lib::{
+    credentials::ConnectionSecret,
+    registry::{
+        AdapterId, AuthenticationMode, ConnectionAuth, ConnectionProfile, MutationValue,
+        NacosApiVersion, RegistryService, ResourceAddress, ResourceMutation, TlsProfile,
+        ValueEncoding,
+    },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -12,7 +16,49 @@ fn profile(adapter: AdapterId, endpoint: String) -> ConnectionProfile {
         endpoint,
         namespace: String::new(),
         nacos_api_version: NacosApiVersion::V2,
+        environment: Default::default(),
+        auth: Default::default(),
+        tls: Default::default(),
     }
+}
+
+fn secured_profile(
+    adapter: AdapterId,
+    endpoint: String,
+) -> (ConnectionProfile, Option<ConnectionSecret>) {
+    let mut profile = profile(adapter, endpoint);
+    let prefix = match adapter {
+        AdapterId::Etcd => "ATLAS_TEST_ETCD",
+        AdapterId::Zookeeper => "ATLAS_TEST_ZOOKEEPER",
+        AdapterId::Nacos => "ATLAS_TEST_NACOS",
+    };
+    let username = std::env::var(format!("{prefix}_USERNAME")).ok();
+    let secret = username.map(|username| {
+        profile.auth = ConnectionAuth {
+            mode: if adapter == AdapterId::Zookeeper {
+                AuthenticationMode::Digest
+            } else {
+                AuthenticationMode::UsernamePassword
+            },
+            username,
+            custom_key: String::new(),
+        };
+        ConnectionSecret::new(
+            std::env::var(format!("{prefix}_PASSWORD"))
+                .unwrap_or_else(|_| panic!("set {prefix}_PASSWORD with {prefix}_USERNAME")),
+        )
+    });
+    if std::env::var(format!("{prefix}_TLS")).as_deref() == Ok("1") {
+        profile.tls = TlsProfile {
+            enabled: true,
+            ca_certificate_path: std::env::var(format!("{prefix}_TLS_CA")).unwrap_or_default(),
+            client_certificate_path: std::env::var(format!("{prefix}_TLS_CERT"))
+                .unwrap_or_default(),
+            client_key_path: std::env::var(format!("{prefix}_TLS_KEY")).unwrap_or_default(),
+            server_name: std::env::var(format!("{prefix}_TLS_SERVER_NAME")).unwrap_or_default(),
+        };
+    }
+    (profile, secret)
 }
 
 fn mutations_enabled() -> bool {
@@ -43,10 +89,11 @@ fn etcd_live_session_can_browse_the_root() {
     let endpoint = std::env::var("ATLAS_TEST_ETCD_ENDPOINT")
         .expect("set ATLAS_TEST_ETCD_ENDPOINT before running ignored tests");
     let service = RegistryService::default();
+    let (connection, secret) = secured_profile(AdapterId::Etcd, endpoint);
 
     tauri::async_runtime::block_on(async {
         let session = service
-            .open(profile(AdapterId::Etcd, endpoint))
+            .open_with_credentials(connection, secret)
             .await
             .expect("etcd session should open");
         let page = service
@@ -86,10 +133,11 @@ fn zookeeper_live_session_can_browse_the_root() {
     let endpoint = std::env::var("ATLAS_TEST_ZOOKEEPER_ENDPOINT")
         .expect("set ATLAS_TEST_ZOOKEEPER_ENDPOINT before running ignored tests");
     let service = RegistryService::default();
+    let (connection, secret) = secured_profile(AdapterId::Zookeeper, endpoint);
 
     tauri::async_runtime::block_on(async {
         let session = service
-            .open(profile(AdapterId::Zookeeper, endpoint))
+            .open_with_credentials(connection, secret)
             .await
             .expect("ZooKeeper session should open");
         let page = service
@@ -132,13 +180,13 @@ fn nacos_live_session_can_browse_the_config_list() {
         _ => NacosApiVersion::V2,
     };
     let service = RegistryService::default();
-    let mut connection = profile(AdapterId::Nacos, endpoint);
+    let (mut connection, secret) = secured_profile(AdapterId::Nacos, endpoint);
     connection.nacos_api_version = version;
     connection.namespace = std::env::var("ATLAS_TEST_NACOS_NAMESPACE").unwrap_or_default();
 
     tauri::async_runtime::block_on(async {
         let session = service
-            .open(connection)
+            .open_with_credentials(connection, secret)
             .await
             .expect("Nacos session should open");
         let page = service

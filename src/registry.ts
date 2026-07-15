@@ -2,6 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type AdapterId = "etcd" | "zookeeper" | "nacos";
 export type NacosApiVersion = "v2" | "v3";
+export type ConnectionEnvironment =
+  | "unspecified"
+  | "development"
+  | "testing"
+  | "staging"
+  | "production";
+export type AuthenticationMode = "none" | "usernamePassword" | "digest" | "custom";
 
 export type AdapterDescriptor = {
   id: AdapterId;
@@ -16,6 +23,36 @@ export type ConnectionProfile = {
   endpoint: string;
   namespace: string;
   nacosApiVersion: NacosApiVersion;
+  environment: ConnectionEnvironment;
+  auth: {
+    mode: AuthenticationMode;
+    username: string;
+    customKey: string;
+  };
+  tls: {
+    enabled: boolean;
+    caCertificatePath: string;
+    clientCertificatePath: string;
+    clientKeyPath: string;
+    serverName: string;
+  };
+};
+
+export type CredentialUpdate = {
+  operation: "preserve";
+} | {
+  operation: "replace";
+  secret: string;
+} | {
+  operation: "clear";
+};
+
+export const connectionEnvironmentLabels: Record<ConnectionEnvironment, string> = {
+  unspecified: "未指定",
+  development: "开发",
+  testing: "测试",
+  staging: "预发",
+  production: "生产",
 };
 
 export type ConnectionSession = {
@@ -119,16 +156,39 @@ export function loadConnectionProfiles() {
   return invoke<ConnectionProfile[]>("load_connection_profiles");
 }
 
-export function saveConnectionProfiles(profiles: ConnectionProfile[]) {
-  return invoke<void>("save_connection_profiles", { profiles });
+export function upsertConnectionProfile(
+  profile: ConnectionProfile,
+  credentialUpdate: CredentialUpdate,
+) {
+  return invoke<ConnectionProfile[]>("upsert_connection_profile", { profile, credentialUpdate });
 }
 
-export function probeConnection(profile: ConnectionProfile, operationId: string) {
-  return invoke<ConnectionProbe>("probe_connection", { profile, operationId });
+export function deleteConnectionProfile(connectionId: string) {
+  return invoke<ConnectionProfile[]>("delete_connection_profile", { connectionId });
 }
 
-export function openConnection(profile: ConnectionProfile, operationId: string) {
-  return invoke<ConnectionSession>("open_connection", { profile, operationId });
+export function probeConnection(
+  profile: ConnectionProfile,
+  operationId: string,
+  secret?: string,
+) {
+  return invoke<ConnectionProbe>("probe_connection", {
+    profile,
+    operationId,
+    transientCredential: secret === undefined ? null : { secret },
+  });
+}
+
+export function openConnection(
+  profile: ConnectionProfile,
+  operationId: string,
+  secret?: string,
+) {
+  return invoke<ConnectionSession>("open_connection", {
+    profile,
+    operationId,
+    transientCredential: secret === undefined ? null : { secret },
+  });
 }
 
 export function closeConnection(connectionId: string) {

@@ -70,6 +70,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .button.danger:hover:not(:disabled) { border-color: #a64f5a; background: #351b24; }
 .button.wide { width: 100%; margin-top: 14px; background: transparent; }
 .button.primary.wide { background: #55d6be; }
+.connection-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.connection-actions .button { padding-block: 7px; background: transparent; }
 
 .shell { display: grid; grid-template-columns: 250px 330px 1fr; height: calc(100vh - 58px); }
 .connections, .tree { border-right: 1px solid #263447; }
@@ -259,6 +261,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   background: #101925;
   box-shadow: 0 24px 80px #000b;
 }
+.connection-dialog { width: min(720px, 100%); max-height: calc(100vh - 48px); overflow: auto; }
 .dialog-heading { display: flex; align-items: start; justify-content: space-between; margin-bottom: 20px; }
 .dialog-heading h2 { margin: 0; }
 .dialog label { display: grid; gap: 7px; margin-bottom: 15px; color: #a9b7c8; font-size: 12px; font-weight: 700; }
@@ -266,7 +269,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .form-grid { display: grid; grid-template-columns: 1fr 160px; gap: 12px; }
 .form-grid.equal { grid-template-columns: 1fr 1fr; }
 .form-note { padding: 10px 12px; border-radius: 9px; color: #91a0b2; background: #0b121c; font-size: 12px; line-height: 1.55; }
+.form-section { margin: 18px 0; padding: 15px; border: 1px solid #263447; border-radius: 12px; background: #0d151f; }
+.form-section-title { margin-bottom: 12px; color: #d5e0eb; font-size: 13px; font-weight: 800; }
+.dialog label.checkbox-label { display: flex; grid-template-columns: auto 1fr; align-items: center; gap: 9px; }
+.dialog label.checkbox-label input { width: 16px; height: 16px; margin: 0; accent-color: #55d6be; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
+.dialog-actions.split-actions { align-items: center; justify-content: space-between; }
+.action-group { display: flex; gap: 9px; }
 .resource-dialog { width: min(720px, 100%); }
 .resource-dialog textarea { min-height: 220px; resize: vertical; font: 13px/1.6 "SFMono-Regular", Consolas, monospace; }
 .mutation-dialog { width: min(640px, 100%); }
