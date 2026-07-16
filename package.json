@@ -1,11 +1,12 @@
 {
   "name": "atlas-registry",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:ui": "node --test scripts/ui-layer-contract.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

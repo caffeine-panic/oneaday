@@ -1,6 +1,6 @@
 # 实现与发布验证记录
 
-本记录对应 Atlas Registry `0.1.0` 当前工作树，验证日期为 2026-07-15 至 2026-07-16。它区分已经在本机取得的证据与必须由 GitHub Actions/组织发布环境完成的证据，避免把“配置了门禁”写成“所有平台已经通过”。
+本记录对应 Atlas Registry `0.1.1` 当前工作树，验证日期为 2026-07-15 至 2026-07-16。它区分已经在本机取得的证据与必须由 GitHub Actions/组织发布环境完成的证据，避免把“配置了门禁”写成“所有平台已经通过”。
 
 ## 真实服务兼容性
 
@@ -42,14 +42,15 @@ Nacos 3.2.3 的 SDK listener 在一次实测中未及时交付回调；加入每
 - ZooKeeper ACL 编辑器显示 aversion、逐项权限与 ADMIN 防误锁；节点模式菜单包含四种原生模式。
 - Nacos 3 Admin API 列出 public namespace，创建服务和 persistent instance 后均完成权威回读，并展示脱敏审计结果。
 - 视觉验收发现并修复了“实例变更成功后 service selection 被刷新清空、实例页变为空白”的状态机问题；修复后实例操作会保留当前服务并重载实例列表。
+- `0.1.1` 修复全局结果 Toast 位于模态遮罩下方、被 `backdrop-filter` 模糊的问题；新增 UI 层级契约测试，要求 Toast 的唯一权威层级高于模态遮罩。
 
 视觉 smoke 完成后，又以同一 ignored mutation 契约分别连接官方 Nacos 2.5.2 与 3.2.3 发行包，验证临时 service/instance 的 Naming SDK 注册、权重/metadata 更新、心跳可见性和显式注销。2.x 管理响应省略/误报实例生命周期的差异由 service 生命周期补全，并已纳入回归路径。
 
 本机 DMG：
 
 ```text
-src-tauri/target/release/bundle/dmg/Atlas Registry_0.1.0_aarch64.dmg
-SHA-256 58562f31b907110e13709f873c0b91b99baffb34bb43f178cec0ce0ed9bdc6a7
+src-tauri/target/release/bundle/dmg/Atlas Registry_0.1.1_aarch64.dmg
+SHA-256 bb60c858e9375b802364b62af86e568e9cb38a3eb72ccdae6b429a9e415fde58
 bundle id dev.oneaday.atlas-registry
 ```
 

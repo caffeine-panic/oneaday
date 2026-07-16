@@ -1,6 +1,6 @@
 # Atlas Registry 发布流程
 
-发布入口是 `.github/workflows/release.yml`。它只响应与应用版本完全一致的语义版本 tag，例如当前 `src-tauri/tauri.conf.json` 为 `0.1.0` 时只能使用 `v0.1.0`。工作流在 Linux x64、Windows x64、macOS Apple Silicon 和 macOS Intel 上构建原生安装包，并始终创建 GitHub **Draft Release**，不会自动公开。
+发布入口是 `.github/workflows/release.yml`。它只响应与应用版本完全一致的语义版本 tag，例如当前 `src-tauri/tauri.conf.json` 为 `0.1.1` 时只能使用 `v0.1.1`。工作流在 Linux x64、Windows x64、macOS Apple Silicon 和 macOS Intel 上构建原生安装包，并始终创建 GitHub **Draft Release**，不会自动公开。
 
 所有 GitHub Actions 均固定到完整 commit SHA；更新 action 时应先核对官方 tag 指向，再同时更新注释中的版本。`release` environment 建议配置 required reviewers，tag `v*` 建议配置保护规则。
 

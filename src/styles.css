@@ -282,7 +282,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .toast {
   position: fixed;
-  z-index: 20;
+  z-index: 40;
   right: 20px;
   bottom: 20px;
   max-width: min(540px, 80vw);
