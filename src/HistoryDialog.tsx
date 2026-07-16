@@ -29,6 +29,27 @@ const operationLabels = {
   delete: "删除",
 } as const;
 
+const nativeOperationLabels = {
+  etcdLeaseGrantAndAttach: "创建并绑定 Lease",
+  etcdLeaseAttach: "绑定 Lease",
+  etcdLeaseDetach: "解绑 Lease",
+  etcdLeaseKeepAlive: "Lease 续租",
+  etcdLeaseRevoke: "撤销 Lease",
+  zookeeperAclSet: "更新 ZooKeeper ACL",
+  zookeeperPersistentSequentialCreate: "创建持久顺序节点",
+  zookeeperEphemeralCreate: "创建临时节点",
+  zookeeperEphemeralSequentialCreate: "创建临时顺序节点",
+  nacosCreateNamespace: "创建 Nacos 命名空间",
+  nacosUpdateNamespace: "更新 Nacos 命名空间",
+  nacosDeleteNamespace: "删除 Nacos 命名空间",
+  nacosCreateService: "创建 Nacos 服务",
+  nacosUpdateService: "更新 Nacos 服务",
+  nacosDeleteService: "删除 Nacos 服务",
+  nacosRegisterInstance: "注册 Nacos 实例",
+  nacosUpdateInstance: "更新 Nacos 实例",
+  nacosDeregisterInstance: "注销 Nacos 实例",
+} as const;
+
 export function HistoryDialog({
   profiles,
   scope,
@@ -64,7 +85,11 @@ export function HistoryDialog({
             <article className={`history-item ${item.kind}`} key={`${item.operationId}-${item.kind}-${item.timestampMs}-${index}`}>
               <div className="history-item-heading">
                 <span className="history-kind">{kindLabels[item.kind]}</span>
-                <b>{item.operation ? operationLabels[item.operation] : "写入流程"}</b>
+                <b>{item.operation
+                  ? operationLabels[item.operation]
+                  : item.nativeOperation
+                    ? nativeOperationLabels[item.nativeOperation]
+                    : "写入流程"}</b>
                 <time>{new Date(item.timestampMs).toLocaleString("zh-CN")}</time>
               </div>
               <div className="history-target">
@@ -73,6 +98,7 @@ export function HistoryDialog({
               </div>
               <div className="history-details">
                 {item.expectedVersion && <span>期望版本 {item.expectedVersion}</span>}
+                {item.nativeTarget && <span>{item.nativeTarget}</span>}
                 {item.consistency && <span>{item.consistency === "atomic" ? "原子条件" : "检查后变更"}</span>}
                 {item.errorCode && <span>错误 {item.errorCode}</span>}
                 {snapshotText(item.previous, "变更前")}

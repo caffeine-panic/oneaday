@@ -1,6 +1,7 @@
 fn main() {
     const COMMANDS: &[&str] = &[
         "registry_capabilities",
+        "export_diagnostic_bundle",
         "probe_connection",
         "load_connection_profiles",
         "upsert_connection_profile",
@@ -14,6 +15,14 @@ fn main() {
         "read_resource_history",
         "inspect_native_resource",
         "mutate_resource",
+        "execute_etcd_transaction",
+        "execute_etcd_lease_action",
+        "execute_zookeeper_native_action",
+        "list_nacos_namespaces",
+        "list_nacos_services",
+        "read_nacos_service",
+        "list_nacos_instances",
+        "execute_nacos_native_action",
         "export_resource",
         "choose_import",
         "apply_import",

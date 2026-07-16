@@ -23,10 +23,12 @@
 
 当前 workflow 会生成 Windows 和 Linux draft bundle，但仓库尚未配置 Windows 代码签名证书或 Linux 包签名密钥。发布者应在公开 release 前完成组织证书接入、签名验证和恶意软件扫描；不要把 PFX、私钥或密码提交到仓库。
 
+质量门禁会实际展开或安装每种包格式：Ubuntu 安装 DEB 并检查 `/usr/bin` 可执行文件，同时展开 AppImage；Windows 分别执行 MSI administrative install 与 NSIS silent install，并检查安装后的 `atlas-registry.exe`；macOS 校验 app/DMG、复制安装后的 bundle id 与代码签名结构。CI 会输出包和安装结果的 SHA-256。没有组织证书时，`NotSigned` 只能用于内部验证；任何 `HashMismatch` 都会直接失败。
+
 ## 发布检查
 
 1. 确认 `quality.yml` 三平台通过，`compatibility.yml` 六项真实服务契约通过。
 2. 同步 `package.json`、`src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 的版本。
 3. 创建并推送匹配的 `vX.Y.Z` tag。
-4. 检查 Draft Release 中四类 bundle；验证 macOS 签名/公证以及 Windows/Linux 签名状态。
-5. 在隔离机器上完成安装、首次启动、系统凭据库和三类只读连接 smoke test 后，再手动发布 draft。
+4. 检查 Draft Release 中四类 bundle；验证 macOS 签名/公证以及 Windows/Linux 签名状态，并与 CI SHA-256 对照。
+5. 在隔离机器上完成安装、首次启动、系统凭据库、三类连接和协议原生写入 smoke test 后，再手动发布 draft。

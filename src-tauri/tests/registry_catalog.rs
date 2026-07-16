@@ -29,15 +29,28 @@ fn catalog_reports_read_watch_and_safe_mutation_capabilities_for_each_native_ada
     assert_eq!(descriptors[0].status, AdapterStatus::Available);
     assert_eq!(
         descriptors[0].capabilities,
-        [common.clone(), vec![Capability::Lease]].concat()
+        [
+            common.clone(),
+            vec![Capability::Lease, Capability::Transaction],
+        ]
+        .concat()
     );
     assert_eq!(
         descriptors[1].capabilities,
-        [common.clone(), vec![Capability::Acl]].concat()
+        [common.clone(), vec![Capability::Acl, Capability::Ephemeral]].concat()
     );
     assert_eq!(
         descriptors[2].capabilities,
-        [common, vec![Capability::History]].concat()
+        [
+            common,
+            vec![
+                Capability::History,
+                Capability::Namespace,
+                Capability::Service,
+                Capability::Instance,
+            ],
+        ]
+        .concat()
     );
 }
 
@@ -167,6 +180,11 @@ fn utf8_resource_values_remain_editable_text() {
 
 #[test]
 fn values_larger_than_the_inline_limit_are_kept_out_of_the_webview() {
+    let boundary = vec![b'a'; EncodedValue::MAX_INLINE_BYTES];
+    let inline = EncodedValue::try_from_inline_bytes(&boundary)
+        .expect("a value exactly at the inline limit must remain readable");
+    assert_eq!(inline.size_bytes, EncodedValue::MAX_INLINE_BYTES);
+
     let oversized = vec![b'a'; EncodedValue::MAX_INLINE_BYTES + 1];
     let error = EncodedValue::try_from_inline_bytes(&oversized)
         .expect_err("oversized values must not cross the Tauri boundary");

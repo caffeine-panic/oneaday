@@ -24,6 +24,29 @@ pub enum AuditHistoryKind {
     OutcomeUnknown,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NativeAuditOperation {
+    EtcdLeaseGrantAndAttach,
+    EtcdLeaseAttach,
+    EtcdLeaseDetach,
+    EtcdLeaseKeepAlive,
+    EtcdLeaseRevoke,
+    ZookeeperAclSet,
+    ZookeeperPersistentSequentialCreate,
+    ZookeeperEphemeralCreate,
+    ZookeeperEphemeralSequentialCreate,
+    NacosCreateNamespace,
+    NacosUpdateNamespace,
+    NacosDeleteNamespace,
+    NacosCreateService,
+    NacosUpdateService,
+    NacosDeleteService,
+    NacosRegisterInstance,
+    NacosUpdateInstance,
+    NacosDeregisterInstance,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditHistoryItem {
@@ -32,7 +55,9 @@ pub struct AuditHistoryItem {
     pub connection_id: String,
     pub operation_id: String,
     pub operation: Option<MutationOperation>,
+    pub native_operation: Option<NativeAuditOperation>,
     pub address: Option<ResourceAddress>,
+    pub native_target: Option<String>,
     pub expected_version: Option<String>,
     pub previous: Option<ResourceSnapshot>,
     pub current: Option<ResourceSnapshot>,
@@ -82,6 +107,29 @@ enum StoredAuditEvent {
         connection_id: String,
         operation_id: String,
     },
+    #[serde(rename = "nativeMutationStarted")]
+    NativeStarted {
+        timestamp_ms: u64,
+        connection_id: String,
+        operation_id: String,
+        operation: NativeAuditOperation,
+        address: Option<ResourceAddress>,
+        expected_version: Option<String>,
+        previous: Option<ResourceSnapshot>,
+        target: Option<String>,
+    },
+    #[serde(rename = "nativeMutationApplied")]
+    NativeApplied {
+        timestamp_ms: u64,
+        connection_id: String,
+        operation_id: String,
+        operation: NativeAuditOperation,
+        address: Option<ResourceAddress>,
+        previous: Option<ResourceSnapshot>,
+        current: Option<ResourceSnapshot>,
+        consistency: crate::registry::MutationConsistency,
+        target: Option<String>,
+    },
 }
 
 impl StoredAuditEvent {
@@ -90,7 +138,9 @@ impl StoredAuditEvent {
             Self::Started { connection_id, .. }
             | Self::Applied { connection_id, .. }
             | Self::Failed { connection_id, .. }
-            | Self::OutcomeUnknown { connection_id, .. } => connection_id,
+            | Self::OutcomeUnknown { connection_id, .. }
+            | Self::NativeStarted { connection_id, .. }
+            | Self::NativeApplied { connection_id, .. } => connection_id,
         }
     }
 }
@@ -112,7 +162,9 @@ impl From<StoredAuditEvent> for AuditHistoryItem {
                 connection_id,
                 operation_id,
                 operation: Some(operation),
+                native_operation: None,
                 address: Some(address),
+                native_target: None,
                 expected_version,
                 previous,
                 current: None,
@@ -130,7 +182,9 @@ impl From<StoredAuditEvent> for AuditHistoryItem {
                 connection_id,
                 operation_id,
                 operation: Some(result.operation),
+                native_operation: None,
                 address: Some(result.address),
+                native_target: None,
                 expected_version: None,
                 previous: result.previous,
                 current: result.current,
@@ -148,7 +202,9 @@ impl From<StoredAuditEvent> for AuditHistoryItem {
                 connection_id,
                 operation_id,
                 operation: None,
+                native_operation: None,
                 address: None,
+                native_target: None,
                 expected_version: None,
                 previous: None,
                 current: None,
@@ -165,11 +221,62 @@ impl From<StoredAuditEvent> for AuditHistoryItem {
                 connection_id,
                 operation_id,
                 operation: None,
+                native_operation: None,
                 address: None,
+                native_target: None,
                 expected_version: None,
                 previous: None,
                 current: None,
                 consistency: None,
+                error_code: None,
+            },
+            StoredAuditEvent::NativeStarted {
+                timestamp_ms,
+                connection_id,
+                operation_id,
+                operation,
+                address,
+                expected_version,
+                previous,
+                target,
+            } => Self {
+                kind: AuditHistoryKind::Started,
+                timestamp_ms,
+                connection_id,
+                operation_id,
+                operation: None,
+                native_operation: Some(operation),
+                address,
+                native_target: target,
+                expected_version,
+                previous,
+                current: None,
+                consistency: None,
+                error_code: None,
+            },
+            StoredAuditEvent::NativeApplied {
+                timestamp_ms,
+                connection_id,
+                operation_id,
+                operation,
+                address,
+                previous,
+                current,
+                consistency,
+                target,
+            } => Self {
+                kind: AuditHistoryKind::Applied,
+                timestamp_ms,
+                connection_id,
+                operation_id,
+                operation: None,
+                native_operation: Some(operation),
+                address,
+                native_target: target,
+                expected_version: None,
+                previous,
+                current,
+                consistency: Some(consistency),
                 error_code: None,
             },
         }
@@ -213,6 +320,29 @@ enum AuditEvent<'a> {
         timestamp_ms: u64,
         connection_id: &'a str,
         operation_id: &'a str,
+    },
+    #[serde(rename = "nativeMutationStarted")]
+    NativeStarted {
+        timestamp_ms: u64,
+        connection_id: &'a str,
+        operation_id: &'a str,
+        operation: NativeAuditOperation,
+        address: Option<&'a ResourceAddress>,
+        expected_version: Option<&'a str>,
+        previous: Option<&'a ResourceSnapshot>,
+        target: Option<&'a str>,
+    },
+    #[serde(rename = "nativeMutationApplied")]
+    NativeApplied {
+        timestamp_ms: u64,
+        connection_id: &'a str,
+        operation_id: &'a str,
+        operation: NativeAuditOperation,
+        address: Option<&'a ResourceAddress>,
+        previous: Option<&'a ResourceSnapshot>,
+        current: Option<&'a ResourceSnapshot>,
+        consistency: crate::registry::MutationConsistency,
+        target: Option<&'a str>,
     },
 }
 
@@ -408,6 +538,64 @@ impl AuditLog {
                 timestamp_ms: timestamp_ms()?,
                 connection_id,
                 operation_id,
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_native_started_in(
+        &self,
+        directory: &Path,
+        connection_id: &str,
+        operation_id: &str,
+        operation: NativeAuditOperation,
+        address: Option<&ResourceAddress>,
+        expected_version: Option<&str>,
+        previous: Option<&ResourceSnapshot>,
+        target: Option<&str>,
+    ) -> Result<(), RegistryError> {
+        self.append(
+            directory,
+            &AuditEvent::NativeStarted {
+                timestamp_ms: timestamp_ms()?,
+                connection_id,
+                operation_id,
+                operation,
+                address,
+                expected_version,
+                previous,
+                target,
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_native_applied_in(
+        &self,
+        directory: &Path,
+        connection_id: &str,
+        operation_id: &str,
+        operation: NativeAuditOperation,
+        address: Option<&ResourceAddress>,
+        previous: Option<&ResourceSnapshot>,
+        current: Option<&ResourceSnapshot>,
+        consistency: crate::registry::MutationConsistency,
+        target: Option<&str>,
+    ) -> Result<(), RegistryError> {
+        self.append(
+            directory,
+            &AuditEvent::NativeApplied {
+                timestamp_ms: timestamp_ms()?,
+                connection_id,
+                operation_id,
+                operation,
+                address,
+                previous,
+                current,
+                consistency,
+                target,
             },
         )
         .await

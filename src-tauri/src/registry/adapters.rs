@@ -10,6 +10,7 @@ use etcd_client::{
 use nacos_sdk::api::{
     config::{ConfigService, ConfigServiceBuilder},
     error::Error as NacosError,
+    naming::{NamingService, NamingServiceBuilder},
     props::ClientProps,
 };
 use serde::Deserialize;
@@ -17,17 +18,26 @@ use zeroize::Zeroizing;
 
 use crate::credentials::ConnectionSecret;
 
+use super::nacos_native;
 use super::{
-    AdapterId, AuthenticationMode, ConnectionProfile, EncodedValue, MutationPhase, MutationResult,
-    NacosApiVersion, NativeResourceInfo, RegistryError, RegistryErrorCode, ResourceAddress,
-    ResourceDocument, ResourceHistoryDocument, ResourceHistoryEntry, ResourceHistoryPage,
-    ResourceHistoryRequest, ResourceMutation, ResourceNode, ResourcePage, ResourceSearchPage,
-    ResourceSearchRequest, ZookeeperAclEntry,
-    mutations::{mutate_etcd, mutate_nacos, mutate_zookeeper},
+    AdapterId, AuthenticationMode, ConnectionProfile, EncodedValue, EtcdLeaseAction,
+    EtcdLeaseActionResult, EtcdTransaction, EtcdTransactionResult, MutationPhase, MutationResult,
+    NacosApiVersion, NacosInstance, NacosNamespace, NacosNativeAction, NacosNativeActionResult,
+    NacosService, NacosServicePage, NativeResourceInfo, RegistryError, RegistryErrorCode,
+    ResourceAddress, ResourceDocument, ResourceHistoryDocument, ResourceHistoryEntry,
+    ResourceHistoryPage, ResourceHistoryRequest, ResourceMutation, ResourceNode, ResourcePage,
+    ResourceSearchPage, ResourceSearchRequest, ZookeeperAclEntry, ZookeeperNativeAction,
+    ZookeeperNativeActionResult,
+    mutations::{
+        execute_etcd_lease_action, execute_etcd_transaction, execute_zookeeper_native_action,
+        mutate_etcd, mutate_nacos, mutate_zookeeper,
+    },
 };
 use nacos_auth::NacosRequestAuth;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_ZOOKEEPER_CHILDREN: usize = 100_000;
 
 #[derive(Clone)]
 pub(super) enum RegistrySession {
@@ -39,6 +49,7 @@ pub(super) enum RegistrySession {
 #[derive(Clone)]
 pub(super) struct NacosSession {
     pub(super) config: ConfigService,
+    pub(super) naming: NamingService,
     http: reqwest::Client,
     endpoint: String,
     namespace: String,
@@ -48,10 +59,21 @@ pub(super) struct NacosSession {
 }
 
 impl NacosSession {
-    pub(super) async fn probe_remote(&self) -> Result<(), RegistryError> {
-        list_nacos(self, ResourceAddress::Root, None, 1)
-            .await
-            .map(|_| ())
+    pub(super) fn native_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> reqwest::RequestBuilder {
+        let url = format!("{}{}", nacos_server_base(&self.endpoint), path);
+        self.request_auth.apply(self.http.request(method, url))
+    }
+
+    pub(super) fn namespace_id(&self) -> &str {
+        public_namespace_for_api(&self.namespace)
+    }
+
+    pub(super) fn api_version(&self) -> NacosApiVersion {
+        self.api_version
     }
 }
 
@@ -79,7 +101,7 @@ impl RegistrySession {
         }
         let secret = secret.map(Arc::new);
 
-        tokio::time::timeout(OPERATION_TIMEOUT, async {
+        tokio::time::timeout(CONNECTION_TIMEOUT, async {
             match profile.adapter {
                 AdapterId::Etcd => Self::connect_etcd(profile, secret.as_deref()).await,
                 AdapterId::Zookeeper => Self::connect_zookeeper(profile, secret.as_deref()).await,
@@ -208,6 +230,155 @@ impl RegistrySession {
         .map_err(|_| timeout_phase.timeout_error())?
     }
 
+    pub(super) async fn execute_etcd_transaction(
+        &self,
+        transaction: EtcdTransaction,
+        phase: MutationPhase,
+    ) -> Result<EtcdTransactionResult, RegistryError> {
+        let timeout_phase = phase.clone();
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Etcd(client) => {
+                    execute_etcd_transaction(client.as_ref().clone(), transaction, &phase).await
+                }
+                _ => Err(RegistryError::unsupported(
+                    "etcd transactions require an etcd connection",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| timeout_phase.timeout_error())?
+    }
+
+    pub(super) async fn execute_etcd_lease_action(
+        &self,
+        action: EtcdLeaseAction,
+        phase: MutationPhase,
+    ) -> Result<EtcdLeaseActionResult, RegistryError> {
+        let timeout_phase = phase.clone();
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Etcd(client) => {
+                    execute_etcd_lease_action(client.as_ref().clone(), action, &phase).await
+                }
+                _ => Err(RegistryError::unsupported(
+                    "etcd lease actions require an etcd connection",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| timeout_phase.timeout_error())?
+    }
+
+    pub(super) async fn execute_zookeeper_native_action(
+        &self,
+        action: ZookeeperNativeAction,
+        phase: MutationPhase,
+    ) -> Result<ZookeeperNativeActionResult, RegistryError> {
+        let timeout_phase = phase.clone();
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Zookeeper(client) => {
+                    execute_zookeeper_native_action(client, action, &phase).await
+                }
+                _ => Err(RegistryError::unsupported(
+                    "ZooKeeper native actions require a ZooKeeper connection",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| timeout_phase.timeout_error())?
+    }
+
+    pub(super) async fn list_nacos_namespaces(&self) -> Result<Vec<NacosNamespace>, RegistryError> {
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Nacos(session) => nacos_native::list_namespaces(session).await,
+                _ => Err(RegistryError::unsupported(
+                    "Nacos namespace management requires a Nacos connection",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| RegistryError::timeout("Nacos namespace list"))?
+    }
+
+    pub(super) async fn list_nacos_services(
+        &self,
+        group: String,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> Result<NacosServicePage, RegistryError> {
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Nacos(session) => {
+                    nacos_native::list_services(session, group, cursor, limit).await
+                }
+                _ => Err(RegistryError::unsupported(
+                    "Nacos service management requires a Nacos connection",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| RegistryError::timeout("Nacos service list"))?
+    }
+
+    pub(super) async fn read_nacos_service(
+        &self,
+        group: String,
+        service_name: String,
+    ) -> Result<NacosService, RegistryError> {
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Nacos(session) => {
+                    nacos_native::read_service(session, &group, &service_name).await
+                }
+                _ => Err(RegistryError::unsupported(
+                    "Nacos service management requires a Nacos connection",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| RegistryError::timeout("Nacos service detail"))?
+    }
+
+    pub(super) async fn list_nacos_instances(
+        &self,
+        group: String,
+        service_name: String,
+    ) -> Result<Vec<NacosInstance>, RegistryError> {
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Nacos(session) => {
+                    nacos_native::list_instances(session, &group, &service_name).await
+                }
+                _ => Err(RegistryError::unsupported(
+                    "Nacos instance management requires a Nacos connection",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| RegistryError::timeout("Nacos instance list"))?
+    }
+
+    pub(super) async fn execute_nacos_native_action(
+        &self,
+        action: NacosNativeAction,
+        phase: MutationPhase,
+    ) -> Result<NacosNativeActionResult, RegistryError> {
+        let timeout_phase = phase.clone();
+        tokio::time::timeout(OPERATION_TIMEOUT, async {
+            match self {
+                Self::Nacos(session) => nacos_native::execute_action(session, action, &phase).await,
+                _ => Err(RegistryError::unsupported(
+                    "Nacos native actions require a Nacos connection",
+                )),
+            }
+        })
+        .await
+        .map_err(|_| timeout_phase.timeout_error())?
+    }
+
     async fn connect_etcd(
         profile: &ConnectionProfile,
         secret: Option<&ConnectionSecret>,
@@ -281,18 +452,16 @@ impl RegistrySession {
             .map_err(|error| {
                 RegistryError::invalid_response(format!("cannot build Nacos HTTP client: {error}"))
             })?;
-        let builder = ConfigServiceBuilder::new(
-            ClientProps::new()
-                .server_addr(&profile.endpoint)
-                .namespace(sdk_namespace)
-                .app_name("atlas-registry"),
-        );
-        let (builder, request_auth) =
-            nacos_auth::configure(builder, http.clone(), profile, secret.as_ref())?;
-        let config = builder
-            .build()
-            .await
-            .map_err(|error| RegistryError::network(format!("Nacos connection failed: {error}")))?;
+        let client_props = ClientProps::new()
+            .server_addr(&profile.endpoint)
+            .namespace(sdk_namespace)
+            .app_name("atlas-registry");
+        let builder = ConfigServiceBuilder::new(client_props.clone());
+        let auth = nacos_auth::configure(builder, http.clone(), profile, secret.as_ref())?;
+        let config =
+            auth.config_builder.build().await.map_err(|error| {
+                RegistryError::network(format!("Nacos connection failed: {error}"))
+            })?;
 
         match config
             .get_config(
@@ -309,13 +478,22 @@ impl RegistrySession {
             }
         }
 
+        let mut naming_builder = NamingServiceBuilder::new(client_props);
+        if let Some(sdk_auth) = auth.sdk_auth {
+            naming_builder = naming_builder.with_auth_plugin(sdk_auth);
+        }
+        let naming = naming_builder.build().await.map_err(|error| {
+            RegistryError::network(format!("Nacos naming connection failed: {error}"))
+        })?;
+
         Ok(Self::Nacos(NacosSession {
             config,
+            naming,
             http,
             endpoint: profile.endpoint.clone(),
             namespace: profile.namespace.clone(),
             api_version: profile.nacos_api_version,
-            request_auth,
+            request_auth: auth.request_auth,
             _credential: secret,
         }))
     }
@@ -652,32 +830,64 @@ async fn list_zookeeper(
         _ => return Err(adapter_mismatch(AdapterId::Zookeeper, &parent)),
     };
     let offset = parse_page_offset(cursor)?;
-    let mut children = client
+    let children = client
         .list_children(path)
         .await
         .map_err(|error| RegistryError::network(format!("ZooKeeper list failed: {error}")))?;
-    children.sort();
-    let items = children
-        .iter()
-        .skip(offset)
-        .take(limit)
+    let window = page_zookeeper_children(children, offset, limit)?;
+    let items = window
+        .items
+        .into_iter()
         .map(|name| ResourceNode {
             address: ResourceAddress::Zookeeper {
-                path: join_zookeeper_path(path, name),
+                path: join_zookeeper_path(path, &name),
             },
-            name: name.clone(),
+            name,
             readable: true,
             has_children: None,
         })
         .collect::<Vec<_>>();
-    let consumed = offset + items.len();
-    let next_cursor = (consumed < children.len()).then(|| consumed.to_string());
+    let next_cursor = window.next_offset.map(|offset| offset.to_string());
 
     Ok(ResourcePage {
         parent,
         items,
         next_cursor,
     })
+}
+
+#[derive(Debug)]
+struct ZookeeperListWindow {
+    items: Vec<String>,
+    next_offset: Option<usize>,
+}
+
+fn page_zookeeper_children(
+    mut children: Vec<String>,
+    offset: usize,
+    limit: usize,
+) -> Result<ZookeeperListWindow, RegistryError> {
+    ensure_zookeeper_child_bound(children.len())?;
+    children.sort();
+    let items = children
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let consumed = offset.saturating_add(items.len());
+    let next_offset = (consumed < children.len()).then_some(consumed);
+    Ok(ZookeeperListWindow { items, next_offset })
+}
+
+fn ensure_zookeeper_child_bound(count: usize) -> Result<(), RegistryError> {
+    if count > MAX_ZOOKEEPER_CHILDREN {
+        Err(RegistryError::resource_exhausted(format!(
+            "ZooKeeper parent has {count} children; Atlas supports at most {MAX_ZOOKEEPER_CHILDREN} children per parent"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 struct ZookeeperSearchWindow {
@@ -692,7 +902,8 @@ fn search_zookeeper_children(
     query: &str,
     offset: usize,
     limit: usize,
-) -> ZookeeperSearchWindow {
+) -> Result<ZookeeperSearchWindow, RegistryError> {
+    ensure_zookeeper_child_bound(children.len())?;
     children.sort();
     let query = query.to_lowercase();
     let mut items = Vec::new();
@@ -708,11 +919,11 @@ fn search_zookeeper_children(
             }
         }
     }
-    ZookeeperSearchWindow {
+    Ok(ZookeeperSearchWindow {
         items,
         scanned,
         next_offset,
-    }
+    })
 }
 
 async fn search_zookeeper(
@@ -730,7 +941,7 @@ async fn search_zookeeper(
         .list_children(path)
         .await
         .map_err(|error| RegistryError::network(format!("ZooKeeper search failed: {error}")))?;
-    let window = search_zookeeper_children(children, path, &request.query, offset, limit);
+    let window = search_zookeeper_children(children, path, &request.query, offset, limit)?;
     let items = window
         .items
         .into_iter()
@@ -1659,7 +1870,7 @@ mod tests {
     use super::{
         NacosConfigDetailWire, NacosHistoryPageWire, etcd_cursor_after, etcd_immediate_child,
         nacos_http_error, normalize_nacos_config_detail, normalize_nacos_history_page,
-        normalize_zookeeper_acl, search_zookeeper_children,
+        normalize_zookeeper_acl, page_zookeeper_children, search_zookeeper_children,
     };
     use crate::registry::ResourceAddress;
 
@@ -1687,15 +1898,51 @@ mod tests {
             "service-z".to_owned(),
         ];
 
-        let first = search_zookeeper_children(children.clone(), "/services", "SERVICE", 0, 2);
+        let first = search_zookeeper_children(children.clone(), "/services", "SERVICE", 0, 2)
+            .expect("bounded children should be searchable");
         assert_eq!(first.items, vec!["alpha-service", "config-service"]);
         assert_eq!(first.scanned, 3);
         assert_eq!(first.next_offset, Some(3));
 
-        let second = search_zookeeper_children(children, "/services", "service", 3, 2);
+        let second = search_zookeeper_children(children, "/services", "service", 3, 2)
+            .expect("bounded children should be searchable");
         assert_eq!(second.items, vec!["service-z"]);
         assert_eq!(second.scanned, 2);
         assert_eq!(second.next_offset, None);
+    }
+
+    #[test]
+    fn hundred_thousand_zookeeper_children_remain_cursor_paged_and_value_free() {
+        let children = (0..100_000)
+            .map(|index| format!("node-{index:06}"))
+            .collect::<Vec<_>>();
+
+        let first = page_zookeeper_children(children.clone(), 0, 100)
+            .expect("100k children are within the declared scale envelope");
+        assert_eq!(first.items.len(), 100);
+        assert_eq!(first.items[0], "node-000000");
+        assert_eq!(first.next_offset, Some(100));
+
+        let last = page_zookeeper_children(children.clone(), 99_900, 100)
+            .expect("the last cursor page should remain bounded");
+        assert_eq!(last.items.len(), 100);
+        assert_eq!(last.items[99], "node-099999");
+        assert_eq!(last.next_offset, None);
+
+        let mut oversized = children.clone();
+        oversized.push("node-100000".to_owned());
+        assert_eq!(
+            page_zookeeper_children(oversized, 0, 100)
+                .expect_err("a single parent beyond the scale envelope must fail explicitly")
+                .code,
+            crate::registry::RegistryErrorCode::ResourceExhausted
+        );
+
+        let search = search_zookeeper_children(children, "/large", "node-099999", 0, 100)
+            .expect("identifier-only search should accept 100k children");
+        assert_eq!(search.items, ["node-099999"]);
+        assert_eq!(search.scanned, 100_000);
+        assert_eq!(search.next_offset, None);
     }
 
     #[tokio::test]

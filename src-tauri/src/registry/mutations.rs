@@ -1,17 +1,507 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use etcd_client::{Compare, CompareOp, Error as EtcdError, PutOptions, Txn, TxnOp};
 use nacos_sdk::api::{config::ConfigResponse, error::Error as NacosError};
-use zookeeper_client::{Acls, CreateMode, Error as ZookeeperError};
+use zookeeper_client::{Acl, Acls, AuthId, CreateMode, Error as ZookeeperError, Permission};
 
 use super::{
-    AdapterId, MutationConsistency, MutationOperation, MutationPhase, MutationResult,
+    AdapterId, EncodedValue, EtcdLeaseAction, EtcdLeaseActionResult, EtcdTransaction,
+    EtcdTransactionResult, MutationConsistency, MutationOperation, MutationPhase, MutationResult,
     MutationValue, RegistryError, RegistryErrorCode, ResourceAddress, ResourceMutation,
-    ResourceSnapshot, ValueEncoding,
+    ResourceSnapshot, ValueEncoding, ZookeeperAclEntry, ZookeeperCreateMode, ZookeeperNativeAction,
+    ZookeeperNativeActionResult,
     adapters::{NacosSession, read_nacos_authoritative},
 };
 
+pub(super) async fn execute_zookeeper_native_action(
+    client: &zookeeper_client::Client,
+    action: ZookeeperNativeAction,
+    phase: &MutationPhase,
+) -> Result<ZookeeperNativeActionResult, RegistryError> {
+    action.validate()?;
+    match action {
+        ZookeeperNativeAction::SetAcl {
+            address,
+            expected_acl_version,
+            entries,
+        } => {
+            let path = zookeeper_path(&address)?;
+            let (previous_acls, previous_stat) = client
+                .get_acl(&path)
+                .await
+                .map_err(|error| map_zookeeper_error("read ACL before update", error))?;
+            ensure_version(
+                i64::from(expected_acl_version),
+                i64::from(previous_stat.aversion),
+                "ZooKeeper ACL version",
+            )?;
+            let current_acls = entries
+                .iter()
+                .map(zookeeper_acl_from_entry)
+                .collect::<Result<Vec<_>, _>>()?;
+            let previous_entries = previous_acls.iter().map(zookeeper_acl_to_entry).collect();
+            phase.mark_dispatched();
+            let current_stat = client
+                .set_acl(&path, &current_acls, Some(expected_acl_version))
+                .await
+                .map_err(|error| map_zookeeper_mutation_error("set ACL", error))?;
+            Ok(ZookeeperNativeActionResult::SetAcl {
+                address,
+                previous_acl_version: previous_stat.aversion,
+                current_acl_version: current_stat.aversion,
+                previous_entries,
+                current_entries: entries,
+                consistency: MutationConsistency::Atomic,
+            })
+        }
+        ZookeeperNativeAction::Create {
+            address,
+            value,
+            mode,
+        } => {
+            let path = zookeeper_path(&address)?;
+            let bytes = value.decoded()?;
+            let parent = zookeeper_parent_path(&path)?;
+            let (parent_acls, _) = client
+                .get_acl(parent)
+                .await
+                .map_err(|error| map_zookeeper_error("read parent ACL", error))?;
+            let create_mode = match mode {
+                ZookeeperCreateMode::PersistentSequential => CreateMode::PersistentSequential,
+                ZookeeperCreateMode::Ephemeral => CreateMode::Ephemeral,
+                ZookeeperCreateMode::EphemeralSequential => CreateMode::EphemeralSequential,
+            }
+            .with_acls(Acls::from(parent_acls.as_slice()));
+            phase.mark_dispatched();
+            let (stat, sequence) = client
+                .create(&path, &bytes, &create_mode)
+                .await
+                .map_err(|error| map_zookeeper_mutation_error("native create", error))?;
+            let sequence = mode.is_sequential().then(|| sequence.to_string());
+            let created_path = sequence
+                .as_ref()
+                .map(|sequence| format!("{path}{sequence}"))
+                .unwrap_or_else(|| path.clone());
+            let created_address = ResourceAddress::Zookeeper { path: created_path };
+            Ok(ZookeeperNativeActionResult::Create {
+                requested_address: address,
+                address: created_address,
+                mode,
+                sequence,
+                current: ResourceSnapshot::from_bytes(&bytes, Some(stat.version.to_string())),
+                consistency: MutationConsistency::Atomic,
+            })
+        }
+    }
+}
+
+fn zookeeper_acl_from_entry(entry: &ZookeeperAclEntry) -> Result<Acl, RegistryError> {
+    let mut permission = Permission::NONE;
+    for value in &entry.permissions {
+        permission = permission
+            | match value.trim().to_ascii_lowercase().as_str() {
+                "read" => Permission::READ,
+                "write" => Permission::WRITE,
+                "create" => Permission::CREATE,
+                "delete" => Permission::DELETE,
+                "admin" => Permission::ADMIN,
+                other => {
+                    return Err(RegistryError::validation(format!(
+                        "unsupported ZooKeeper ACL permission: {other}"
+                    )));
+                }
+            };
+    }
+    Ok(Acl::new(
+        permission,
+        AuthId::new(entry.scheme.trim(), entry.id.trim()),
+    ))
+}
+
+fn zookeeper_acl_to_entry(acl: &Acl) -> ZookeeperAclEntry {
+    let permission = acl.permission();
+    let permissions = [
+        (Permission::READ, "read"),
+        (Permission::WRITE, "write"),
+        (Permission::CREATE, "create"),
+        (Permission::DELETE, "delete"),
+        (Permission::ADMIN, "admin"),
+    ]
+    .into_iter()
+    .filter(|(required, _)| permission.has(*required))
+    .map(|(_, name)| name.to_owned())
+    .collect();
+    ZookeeperAclEntry {
+        scheme: acl.scheme().to_owned(),
+        id: acl.id().to_owned(),
+        permissions,
+    }
+}
+
 const NACOS_WRITE_CONFIRM_ATTEMPTS: usize = 12;
 const NACOS_WRITE_CONFIRM_DELAY: std::time::Duration = std::time::Duration::from_millis(125);
+
+pub(super) async fn execute_etcd_lease_action(
+    mut client: etcd_client::Client,
+    action: EtcdLeaseAction,
+    phase: &MutationPhase,
+) -> Result<EtcdLeaseActionResult, RegistryError> {
+    action.validate()?;
+    match action {
+        EtcdLeaseAction::GrantAndAttach {
+            address,
+            expected_version,
+            ttl_seconds,
+        } => {
+            let key = etcd_key(&address)?;
+            let expected = parse_i64_version(&expected_version, "etcd mod revision")?;
+            let previous = get_bounded_etcd_value(&mut client, &key).await?;
+            ensure_version(expected, previous.version, "etcd mod revision")?;
+            phase.mark_dispatched();
+            let grant = client
+                .lease_grant(ttl_seconds, None)
+                .await
+                .map_err(|error| map_etcd_mutation_error("lease grant", error))?;
+            let lease_id = grant.id();
+            let response = client
+                .txn(
+                    Txn::new()
+                        .when(vec![Compare::mod_revision(
+                            key.clone(),
+                            CompareOp::Equal,
+                            expected,
+                        )])
+                        .and_then(vec![TxnOp::put(
+                            key,
+                            previous.bytes.clone(),
+                            Some(PutOptions::new().with_lease(lease_id)),
+                        )]),
+                )
+                .await
+                .map_err(|error| map_etcd_mutation_error("lease attach", error))?;
+            if !response.succeeded() {
+                if let Err(error) = client.lease_revoke(lease_id).await {
+                    return Err(RegistryError::mutation_outcome_unknown(format!(
+                        "the key changed before its new lease could be attached, and cleanup of lease {lease_id} failed: {error}"
+                    )));
+                }
+                return Err(RegistryError::conflict(
+                    "etcd key changed before the new lease could be attached; the unused lease was revoked",
+                ));
+            }
+            let version = etcd_transaction_revision(&response)?;
+            Ok(EtcdLeaseActionResult::GrantAndAttach {
+                address,
+                lease_id: lease_id.to_string(),
+                remaining_ttl_seconds: grant.ttl(),
+                granted_ttl_seconds: grant.ttl(),
+                previous: previous.snapshot(),
+                current: ResourceSnapshot::from_bytes(&previous.bytes, Some(version)),
+                consistency: MutationConsistency::Atomic,
+            })
+        }
+        EtcdLeaseAction::Attach {
+            address,
+            expected_version,
+            lease_id,
+        } => {
+            let lease_id_number = parse_i64_version(&lease_id, "etcd lease id")?;
+            let lease = get_etcd_lease(&mut client, lease_id_number).await?;
+            let key = etcd_key(&address)?;
+            let expected = parse_i64_version(&expected_version, "etcd mod revision")?;
+            let previous = get_bounded_etcd_value(&mut client, &key).await?;
+            ensure_version(expected, previous.version, "etcd mod revision")?;
+            phase.mark_dispatched();
+            let response = client
+                .txn(
+                    Txn::new()
+                        .when(vec![Compare::mod_revision(
+                            key.clone(),
+                            CompareOp::Equal,
+                            expected,
+                        )])
+                        .and_then(vec![TxnOp::put(
+                            key,
+                            previous.bytes.clone(),
+                            Some(PutOptions::new().with_lease(lease_id_number)),
+                        )]),
+                )
+                .await
+                .map_err(|error| map_etcd_mutation_error("lease attach", error))?;
+            if !response.succeeded() {
+                return Err(RegistryError::conflict(
+                    "etcd key changed before the lease could be attached",
+                ));
+            }
+            let version = etcd_transaction_revision(&response)?;
+            Ok(EtcdLeaseActionResult::Attach {
+                address,
+                lease_id,
+                remaining_ttl_seconds: lease.ttl(),
+                granted_ttl_seconds: lease.granted_ttl(),
+                previous: previous.snapshot(),
+                current: ResourceSnapshot::from_bytes(&previous.bytes, Some(version)),
+                consistency: MutationConsistency::Atomic,
+            })
+        }
+        EtcdLeaseAction::Detach {
+            address,
+            expected_version,
+        } => {
+            let key = etcd_key(&address)?;
+            let expected = parse_i64_version(&expected_version, "etcd mod revision")?;
+            let previous = get_bounded_etcd_value(&mut client, &key).await?;
+            ensure_version(expected, previous.version, "etcd mod revision")?;
+            if previous.lease == 0 {
+                return Err(RegistryError::conflict(
+                    "the selected etcd key is no longer attached to a lease",
+                ));
+            }
+            phase.mark_dispatched();
+            let response = client
+                .txn(
+                    Txn::new()
+                        .when(vec![Compare::mod_revision(
+                            key.clone(),
+                            CompareOp::Equal,
+                            expected,
+                        )])
+                        .and_then(vec![TxnOp::put(key, previous.bytes.clone(), None)]),
+                )
+                .await
+                .map_err(|error| map_etcd_mutation_error("lease detach", error))?;
+            if !response.succeeded() {
+                return Err(RegistryError::conflict(
+                    "etcd key changed before its lease could be detached",
+                ));
+            }
+            let version = etcd_transaction_revision(&response)?;
+            Ok(EtcdLeaseActionResult::Detach {
+                address,
+                previous_lease_id: previous.lease.to_string(),
+                previous: previous.snapshot(),
+                current: ResourceSnapshot::from_bytes(&previous.bytes, Some(version)),
+                consistency: MutationConsistency::Atomic,
+            })
+        }
+        EtcdLeaseAction::KeepAlive { address, lease_id } => {
+            let lease_id_number = parse_i64_version(&lease_id, "etcd lease id")?;
+            let key = etcd_key(&address)?;
+            let previous = get_etcd_value(&mut client, &key).await?;
+            ensure_key_lease(previous.lease, lease_id_number)?;
+            phase.mark_dispatched();
+            let (mut keeper, mut responses) = client
+                .lease_keep_alive(lease_id_number)
+                .await
+                .map_err(|error| map_etcd_mutation_error("lease keep-alive", error))?;
+            keeper
+                .keep_alive()
+                .await
+                .map_err(|error| map_etcd_mutation_error("lease keep-alive", error))?;
+            let response = responses
+                .message()
+                .await
+                .map_err(|error| map_etcd_mutation_error("lease keep-alive", error))?
+                .ok_or_else(|| {
+                    RegistryError::mutation_outcome_unknown(
+                        "etcd lease keep-alive stream ended before returning a result",
+                    )
+                })?;
+            if response.ttl() <= 0 {
+                return Err(RegistryError::not_found("etcd lease no longer exists"));
+            }
+            Ok(EtcdLeaseActionResult::KeepAlive {
+                address,
+                lease_id,
+                remaining_ttl_seconds: response.ttl(),
+            })
+        }
+        EtcdLeaseAction::Revoke {
+            address,
+            expected_version,
+            lease_id,
+        } => {
+            let lease_id_number = parse_i64_version(&lease_id, "etcd lease id")?;
+            let key = etcd_key(&address)?;
+            let expected = parse_i64_version(&expected_version, "etcd mod revision")?;
+            let previous = get_bounded_etcd_value(&mut client, &key).await?;
+            ensure_version(expected, previous.version, "etcd mod revision")?;
+            ensure_key_lease(previous.lease, lease_id_number)?;
+            get_etcd_lease(&mut client, lease_id_number).await?;
+            phase.mark_dispatched();
+            client
+                .lease_revoke(lease_id_number)
+                .await
+                .map_err(|error| map_etcd_mutation_error("lease revoke", error))?;
+            Ok(EtcdLeaseActionResult::Revoke {
+                address,
+                lease_id,
+                previous: previous.snapshot(),
+                consistency: MutationConsistency::CheckedBeforeMutation,
+            })
+        }
+    }
+}
+
+async fn get_etcd_lease(
+    client: &mut etcd_client::Client,
+    lease_id: i64,
+) -> Result<etcd_client::LeaseTimeToLiveResponse, RegistryError> {
+    let lease = client
+        .lease_time_to_live(lease_id, None)
+        .await
+        .map_err(|error| RegistryError::network(format!("etcd lease lookup failed: {error}")))?;
+    if lease.ttl() <= 0 {
+        return Err(RegistryError::not_found(format!(
+            "etcd lease {lease_id} does not exist"
+        )));
+    }
+    Ok(lease)
+}
+
+fn ensure_key_lease(current: i64, expected: i64) -> Result<(), RegistryError> {
+    if current == expected {
+        Ok(())
+    } else {
+        Err(RegistryError::conflict(format!(
+            "etcd key lease changed: expected {expected}, current {current}"
+        )))
+    }
+}
+
+pub(super) async fn execute_etcd_transaction(
+    mut client: etcd_client::Client,
+    transaction: EtcdTransaction,
+    phase: &MutationPhase,
+) -> Result<EtcdTransactionResult, RegistryError> {
+    transaction.validate()?;
+    let mut compares = Vec::with_capacity(transaction.mutations.len());
+    let mut operations = Vec::with_capacity(transaction.mutations.len());
+    let mut prepared = Vec::with_capacity(transaction.mutations.len());
+
+    for mutation in transaction.mutations {
+        match mutation {
+            ResourceMutation::Create { address, value, .. } => {
+                let key = etcd_key(&address)?;
+                let bytes = value.decoded()?;
+                compares.push(Compare::version(key.clone(), CompareOp::Equal, 0));
+                operations.push(TxnOp::put(key, bytes.clone(), None));
+                prepared.push(PreparedEtcdTransaction::Create { address, bytes });
+            }
+            ResourceMutation::Update {
+                address,
+                value,
+                expected_version,
+                ..
+            } => {
+                let key = etcd_key(&address)?;
+                let expected = parse_i64_version(&expected_version, "etcd mod revision")?;
+                let previous = get_etcd_value(&mut client, &key).await?;
+                ensure_version(expected, previous.version, "etcd mod revision")?;
+                let bytes = value.decoded()?;
+                let options =
+                    (previous.lease != 0).then(|| PutOptions::new().with_lease(previous.lease));
+                compares.push(Compare::mod_revision(
+                    key.clone(),
+                    CompareOp::Equal,
+                    expected,
+                ));
+                operations.push(TxnOp::put(key, bytes.clone(), options));
+                prepared.push(PreparedEtcdTransaction::Update {
+                    address,
+                    previous,
+                    bytes,
+                });
+            }
+            ResourceMutation::Delete {
+                address,
+                expected_version,
+            } => {
+                let key = etcd_key(&address)?;
+                let expected = parse_i64_version(&expected_version, "etcd mod revision")?;
+                let previous = get_etcd_value(&mut client, &key).await?;
+                ensure_version(expected, previous.version, "etcd mod revision")?;
+                compares.push(Compare::mod_revision(
+                    key.clone(),
+                    CompareOp::Equal,
+                    expected,
+                ));
+                operations.push(TxnOp::delete(key, None));
+                prepared.push(PreparedEtcdTransaction::Delete { address, previous });
+            }
+        }
+    }
+
+    phase.mark_dispatched();
+    let response = client
+        .txn(Txn::new().when(compares).and_then(operations))
+        .await
+        .map_err(|error| map_etcd_mutation_error("transaction", error))?;
+    if !response.succeeded() {
+        return Err(RegistryError::conflict(
+            "one or more etcd transaction compares failed; no operations were applied",
+        ));
+    }
+    let revision = etcd_transaction_revision(&response)?;
+    let results = prepared
+        .into_iter()
+        .map(|item| item.into_result(&revision))
+        .collect();
+    Ok(EtcdTransactionResult { revision, results })
+}
+
+enum PreparedEtcdTransaction {
+    Create {
+        address: ResourceAddress,
+        bytes: Vec<u8>,
+    },
+    Update {
+        address: ResourceAddress,
+        previous: EtcdValue,
+        bytes: Vec<u8>,
+    },
+    Delete {
+        address: ResourceAddress,
+        previous: EtcdValue,
+    },
+}
+
+impl PreparedEtcdTransaction {
+    fn into_result(self, revision: &str) -> MutationResult {
+        match self {
+            Self::Create { address, bytes } => MutationResult {
+                operation: MutationOperation::Create,
+                address,
+                previous: None,
+                current: Some(ResourceSnapshot::from_bytes(
+                    &bytes,
+                    Some(revision.to_owned()),
+                )),
+                consistency: MutationConsistency::Atomic,
+            },
+            Self::Update {
+                address,
+                previous,
+                bytes,
+            } => MutationResult {
+                operation: MutationOperation::Update,
+                address,
+                previous: Some(previous.snapshot()),
+                current: Some(ResourceSnapshot::from_bytes(
+                    &bytes,
+                    Some(revision.to_owned()),
+                )),
+                consistency: MutationConsistency::Atomic,
+            },
+            Self::Delete { address, previous } => MutationResult {
+                operation: MutationOperation::Delete,
+                address,
+                previous: Some(previous.snapshot()),
+                current: None,
+                consistency: MutationConsistency::Atomic,
+            },
+        }
+    }
+}
 
 pub(super) async fn mutate_etcd(
     mut client: etcd_client::Client,
@@ -389,6 +879,15 @@ async fn get_etcd_value(
         version: value.mod_revision(),
         lease: value.lease(),
     })
+}
+
+async fn get_bounded_etcd_value(
+    client: &mut etcd_client::Client,
+    key: &[u8],
+) -> Result<EtcdValue, RegistryError> {
+    let value = get_etcd_value(client, key).await?;
+    EncodedValue::try_from_inline_bytes(&value.bytes)?;
+    Ok(value)
 }
 
 fn etcd_key(address: &ResourceAddress) -> Result<Vec<u8>, RegistryError> {

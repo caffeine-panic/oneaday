@@ -70,5 +70,89 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Build desktop release binary
-        run: npm run tauri build -- --no-bundle
+      - name: Configure ad-hoc macOS signing for CI bundles
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+
+      - name: Build Linux install bundles
+        if: runner.os == 'Linux'
+        run: npm run tauri build -- --bundles deb,appimage
+
+      - name: Build Windows install bundles
+        if: runner.os == 'Windows'
+        run: npm run tauri build -- --bundles msi,nsis
+
+      - name: Build macOS install bundles
+        if: runner.os == 'macOS'
+        run: npm run tauri build -- --bundles app,dmg
+
+      - name: Verify and install Linux bundles
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          deb="$(find src-tauri/target/release/bundle/deb -name '*.deb' -type f -print -quit)"
+          appimage="$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f -print -quit)"
+          test -n "$deb"
+          test -n "$appimage"
+          dpkg-deb --info "$deb"
+          package="$(dpkg-deb -f "$deb" Package)"
+          sudo dpkg -i "$deb"
+          installed_binary="$(dpkg -L "$package" | grep '/usr/bin/' | head -n 1)"
+          test -x "$installed_binary"
+          chmod +x "$appimage"
+          extract_dir="$RUNNER_TEMP/atlas-appimage"
+          mkdir -p "$extract_dir"
+          cd "$extract_dir"
+          "$GITHUB_WORKSPACE/$appimage" --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun
+          sha256sum "$GITHUB_WORKSPACE/$deb" "$GITHUB_WORKSPACE/$appimage"
+
+      - name: Verify and administratively install Windows bundles
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Get-ChildItem src-tauri/target/release/bundle/msi -Filter *.msi -Recurse | Select-Object -First 1
+          $nsis = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter *.exe -Recurse | Select-Object -First 1
+          if (-not $msi -or -not $nsis) { throw 'Windows MSI or NSIS bundle is missing' }
+          $target = Join-Path $env:RUNNER_TEMP 'atlas-msi-install'
+          $arguments = @('/a', ('"{0}"' -f $msi.FullName), '/qn', ('TARGETDIR="{0}"' -f $target))
+          $process = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "MSI administrative install failed with $($process.ExitCode)" }
+          $msiInstalled = Get-ChildItem $target -Filter atlas-registry.exe -Recurse | Select-Object -First 1
+          if (-not $msiInstalled) { throw 'MSI-installed atlas-registry.exe was not found' }
+          $nsisTarget = Join-Path $env:RUNNER_TEMP 'atlas-nsis-install'
+          $process = Start-Process $nsis.FullName -ArgumentList @('/S', "/D=$nsisTarget") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS silent install failed with $($process.ExitCode)" }
+          $nsisInstalled = Get-ChildItem $nsisTarget -Filter atlas-registry.exe -Recurse | Select-Object -First 1
+          if (-not $nsisInstalled) { throw 'NSIS-installed atlas-registry.exe was not found' }
+          Get-FileHash $msi.FullName -Algorithm SHA256
+          Get-FileHash $nsis.FullName -Algorithm SHA256
+          Get-FileHash $msiInstalled.FullName -Algorithm SHA256
+          Get-FileHash $nsisInstalled.FullName -Algorithm SHA256
+          foreach ($bundle in @($msi.FullName, $nsis.FullName, $msiInstalled.FullName, $nsisInstalled.FullName)) {
+            $signature = Get-AuthenticodeSignature $bundle
+            $signature | Format-List Path, Status, StatusMessage, SignerCertificate
+            if ($signature.Status -eq 'HashMismatch') { throw "Authenticode hash mismatch: $bundle" }
+          }
+
+      - name: Verify and install macOS bundles
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          app="$(find src-tauri/target/release/bundle/macos -name '*.app' -type d -print -quit)"
+          dmg="$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f -print -quit)"
+          test -n "$app"
+          test -n "$dmg"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --deep --verbose=4 "$app"
+          hdiutil verify "$dmg"
+          installed="$RUNNER_TEMP/Applications/Atlas Registry.app"
+          mkdir -p "$(dirname "$installed")"
+          ditto "$app" "$installed"
+          test "$(plutil -extract CFBundleIdentifier raw "$installed/Contents/Info.plist")" = "dev.oneaday.atlas-registry"
+          codesign --verify --deep --strict --verbose=2 "$installed"
+          shasum -a 256 "$dmg"

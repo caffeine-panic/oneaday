@@ -1,9 +1,10 @@
 mod adapters;
 mod mutations;
+mod nacos_native;
 mod watch;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     sync::{
         Arc,
@@ -47,7 +48,12 @@ pub enum Capability {
     Delete,
     History,
     Lease,
+    Transaction,
     Acl,
+    Ephemeral,
+    Namespace,
+    Service,
+    Instance,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -64,6 +70,428 @@ pub enum NacosApiVersion {
     #[default]
     V2,
     V3,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosNamespace {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub config_count: u64,
+    pub fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosService {
+    pub namespace_id: String,
+    pub group: String,
+    pub name: String,
+    pub protect_threshold: f64,
+    pub ephemeral: bool,
+    pub metadata: BTreeMap<String, String>,
+    pub fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosServicePage {
+    pub items: Vec<NacosService>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosInstance {
+    pub namespace_id: String,
+    pub group: String,
+    pub service_name: String,
+    pub cluster: String,
+    pub ip: String,
+    pub port: u16,
+    pub weight: f64,
+    pub healthy: bool,
+    pub enabled: bool,
+    pub ephemeral: bool,
+    pub metadata: BTreeMap<String, String>,
+    pub fingerprint: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosNativeOperation {
+    CreateNamespace,
+    UpdateNamespace,
+    DeleteNamespace,
+    CreateService,
+    UpdateService,
+    DeleteService,
+    RegisterInstance,
+    UpdateInstance,
+    DeregisterInstance,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum NacosNativeAction {
+    CreateNamespace {
+        namespace_id: String,
+        name: String,
+        description: String,
+    },
+    UpdateNamespace {
+        namespace_id: String,
+        name: String,
+        description: String,
+        expected_fingerprint: String,
+    },
+    DeleteNamespace {
+        namespace_id: String,
+        expected_fingerprint: String,
+    },
+    CreateService {
+        group: String,
+        service_name: String,
+        protect_threshold: f64,
+        ephemeral: bool,
+        metadata: BTreeMap<String, String>,
+    },
+    UpdateService {
+        group: String,
+        service_name: String,
+        protect_threshold: f64,
+        ephemeral: bool,
+        metadata: BTreeMap<String, String>,
+        expected_fingerprint: String,
+    },
+    DeleteService {
+        group: String,
+        service_name: String,
+        expected_fingerprint: String,
+    },
+    RegisterInstance {
+        group: String,
+        service_name: String,
+        cluster: String,
+        ip: String,
+        port: u16,
+        weight: f64,
+        enabled: bool,
+        ephemeral: bool,
+        metadata: BTreeMap<String, String>,
+    },
+    UpdateInstance {
+        group: String,
+        service_name: String,
+        cluster: String,
+        ip: String,
+        port: u16,
+        weight: f64,
+        enabled: bool,
+        ephemeral: bool,
+        metadata: BTreeMap<String, String>,
+        expected_fingerprint: String,
+    },
+    DeregisterInstance {
+        group: String,
+        service_name: String,
+        cluster: String,
+        ip: String,
+        port: u16,
+        #[serde(default)]
+        ephemeral: bool,
+        expected_fingerprint: String,
+    },
+}
+
+impl NacosNativeAction {
+    pub fn validate(&mut self) -> Result<(), RegistryError> {
+        match self {
+            Self::CreateNamespace {
+                namespace_id,
+                name,
+                description,
+            }
+            | Self::UpdateNamespace {
+                namespace_id,
+                name,
+                description,
+                ..
+            } => {
+                normalize_nacos_identifier(namespace_id, "namespace id", 128)?;
+                normalize_nacos_identifier(name, "namespace name", 128)?;
+                normalize_nacos_description(description)?;
+            }
+            Self::DeleteNamespace { namespace_id, .. } => {
+                normalize_nacos_identifier(namespace_id, "namespace id", 128)?;
+            }
+            Self::CreateService {
+                group,
+                service_name,
+                protect_threshold,
+                metadata,
+                ..
+            }
+            | Self::UpdateService {
+                group,
+                service_name,
+                protect_threshold,
+                metadata,
+                ..
+            } => {
+                validate_nacos_service(group, service_name)?;
+                if !protect_threshold.is_finite() || !(0.0..=1.0).contains(protect_threshold) {
+                    return Err(RegistryError::validation(
+                        "Nacos service protect threshold must be between 0 and 1",
+                    ));
+                }
+                validate_nacos_metadata(metadata)?;
+            }
+            Self::DeleteService {
+                group,
+                service_name,
+                ..
+            } => validate_nacos_service(group, service_name)?,
+            Self::RegisterInstance {
+                group,
+                service_name,
+                cluster,
+                ip,
+                port,
+                weight,
+                ephemeral: _,
+                metadata,
+                ..
+            }
+            | Self::UpdateInstance {
+                group,
+                service_name,
+                cluster,
+                ip,
+                port,
+                weight,
+                ephemeral: _,
+                metadata,
+                ..
+            } => {
+                validate_nacos_instance(
+                    group,
+                    service_name,
+                    cluster,
+                    ip,
+                    *port,
+                    *weight,
+                    metadata,
+                )?;
+            }
+            Self::DeregisterInstance {
+                group,
+                service_name,
+                cluster,
+                ip,
+                port,
+                ..
+            } => {
+                validate_nacos_instance(
+                    group,
+                    service_name,
+                    cluster,
+                    ip,
+                    *port,
+                    1.0,
+                    &BTreeMap::new(),
+                )?;
+            }
+        }
+        if let Some(fingerprint) = self.expected_fingerprint_mut() {
+            *fingerprint = fingerprint.trim().to_owned();
+            if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(RegistryError::validation(
+                    "Nacos native conditional mutation requires a SHA-256 fingerprint",
+                ));
+            }
+        }
+        if matches!(
+            self,
+            Self::DeleteNamespace { namespace_id, .. } if namespace_id == "public"
+        ) {
+            return Err(RegistryError::validation(
+                "the Nacos public namespace cannot be deleted",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn operation(&self) -> NacosNativeOperation {
+        match self {
+            Self::CreateNamespace { .. } => NacosNativeOperation::CreateNamespace,
+            Self::UpdateNamespace { .. } => NacosNativeOperation::UpdateNamespace,
+            Self::DeleteNamespace { .. } => NacosNativeOperation::DeleteNamespace,
+            Self::CreateService { .. } => NacosNativeOperation::CreateService,
+            Self::UpdateService { .. } => NacosNativeOperation::UpdateService,
+            Self::DeleteService { .. } => NacosNativeOperation::DeleteService,
+            Self::RegisterInstance { .. } => NacosNativeOperation::RegisterInstance,
+            Self::UpdateInstance { .. } => NacosNativeOperation::UpdateInstance,
+            Self::DeregisterInstance { .. } => NacosNativeOperation::DeregisterInstance,
+        }
+    }
+
+    pub fn expected_fingerprint(&self) -> Option<&str> {
+        match self {
+            Self::UpdateNamespace {
+                expected_fingerprint,
+                ..
+            }
+            | Self::DeleteNamespace {
+                expected_fingerprint,
+                ..
+            }
+            | Self::UpdateService {
+                expected_fingerprint,
+                ..
+            }
+            | Self::DeleteService {
+                expected_fingerprint,
+                ..
+            }
+            | Self::UpdateInstance {
+                expected_fingerprint,
+                ..
+            }
+            | Self::DeregisterInstance {
+                expected_fingerprint,
+                ..
+            } => Some(expected_fingerprint),
+            _ => None,
+        }
+    }
+
+    fn expected_fingerprint_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::UpdateNamespace {
+                expected_fingerprint,
+                ..
+            }
+            | Self::DeleteNamespace {
+                expected_fingerprint,
+                ..
+            }
+            | Self::UpdateService {
+                expected_fingerprint,
+                ..
+            }
+            | Self::DeleteService {
+                expected_fingerprint,
+                ..
+            }
+            | Self::UpdateInstance {
+                expected_fingerprint,
+                ..
+            }
+            | Self::DeregisterInstance {
+                expected_fingerprint,
+                ..
+            } => Some(expected_fingerprint),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosNativeActionResult {
+    pub operation: NacosNativeOperation,
+    pub target: String,
+    pub consistency: MutationConsistency,
+}
+
+fn normalize_nacos_identifier(
+    value: &mut String,
+    label: &str,
+    max: usize,
+) -> Result<(), RegistryError> {
+    *value = value.trim().to_owned();
+    if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
+        return Err(RegistryError::validation(format!(
+            "Nacos {label} must contain 1–{max} printable characters"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_nacos_description(value: &mut String) -> Result<(), RegistryError> {
+    *value = value.trim().to_owned();
+    if value.len() > 1024 || value.chars().any(|character| character == '\0') {
+        return Err(RegistryError::validation(
+            "Nacos namespace description cannot exceed 1024 characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_nacos_service(
+    group: &mut String,
+    service_name: &mut String,
+) -> Result<(), RegistryError> {
+    normalize_nacos_identifier(group, "group", 128)?;
+    normalize_nacos_identifier(service_name, "service name", 256)
+}
+
+fn validate_nacos_instance(
+    group: &mut String,
+    service_name: &mut String,
+    cluster: &mut String,
+    ip: &mut String,
+    port: u16,
+    weight: f64,
+    metadata: &BTreeMap<String, String>,
+) -> Result<(), RegistryError> {
+    validate_nacos_service(group, service_name)?;
+    normalize_nacos_identifier(cluster, "cluster", 128)?;
+    *ip = ip.trim().to_owned();
+    ip.parse::<std::net::IpAddr>()
+        .map_err(|_| RegistryError::validation("Nacos instance IP is invalid"))?;
+    if port == 0 {
+        return Err(RegistryError::validation(
+            "Nacos instance port must be between 1 and 65535",
+        ));
+    }
+    if !weight.is_finite() || !(0.0..=10_000.0).contains(&weight) {
+        return Err(RegistryError::validation(
+            "Nacos instance weight must be between 0 and 10000",
+        ));
+    }
+    validate_nacos_metadata(metadata)
+}
+
+fn validate_nacos_metadata(metadata: &BTreeMap<String, String>) -> Result<(), RegistryError> {
+    if metadata.len() > 128 {
+        return Err(RegistryError::validation(
+            "Nacos metadata cannot exceed 128 entries",
+        ));
+    }
+    let bytes = serde_json::to_vec(metadata)
+        .map_err(|error| RegistryError::validation(format!("invalid Nacos metadata: {error}")))?;
+    if bytes.len() > 16 * 1024 {
+        return Err(RegistryError::validation(
+            "Nacos metadata cannot exceed 16 KiB",
+        ));
+    }
+    if metadata
+        .iter()
+        .any(|(key, value)| key.trim().is_empty() || key.contains('\0') || value.contains('\0'))
+    {
+        return Err(RegistryError::validation(
+            "Nacos metadata keys must be non-empty and metadata cannot contain NUL",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -357,12 +785,149 @@ pub struct ResourceHistoryDocument {
     pub value: EncodedValue,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ZookeeperAclEntry {
     pub scheme: String,
     pub id: String,
     pub permissions: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ZookeeperCreateMode {
+    PersistentSequential,
+    Ephemeral,
+    EphemeralSequential,
+}
+
+impl ZookeeperCreateMode {
+    pub fn is_sequential(self) -> bool {
+        matches!(self, Self::PersistentSequential | Self::EphemeralSequential)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ZookeeperNativeAction {
+    SetAcl {
+        address: ResourceAddress,
+        expected_acl_version: i32,
+        entries: Vec<ZookeeperAclEntry>,
+    },
+    Create {
+        address: ResourceAddress,
+        value: MutationValue,
+        mode: ZookeeperCreateMode,
+    },
+}
+
+impl ZookeeperNativeAction {
+    pub fn validate(&self) -> Result<(), RegistryError> {
+        match self {
+            Self::SetAcl {
+                address,
+                expected_acl_version,
+                entries,
+            } => {
+                validate_mutation_address(address)?;
+                if *expected_acl_version < 0 {
+                    return Err(RegistryError::validation(
+                        "ZooKeeper ACL version cannot be negative",
+                    ));
+                }
+                if entries.is_empty() || entries.len() > 256 {
+                    return Err(RegistryError::validation(
+                        "ZooKeeper ACL requires between 1 and 256 entries",
+                    ));
+                }
+                let mut identities = BTreeSet::new();
+                let mut has_admin = false;
+                for entry in entries {
+                    let scheme = entry.scheme.trim();
+                    let id = entry.id.trim();
+                    if scheme.is_empty() || scheme.len() > 64 || id.len() > 512 {
+                        return Err(RegistryError::validation(
+                            "ZooKeeper ACL scheme must be 1–64 characters and id at most 512 characters",
+                        ));
+                    }
+                    if !identities.insert((scheme.to_owned(), id.to_owned())) {
+                        return Err(RegistryError::validation(
+                            "ZooKeeper ACL contains a duplicate scheme/id identity",
+                        ));
+                    }
+                    if entry.permissions.is_empty() {
+                        return Err(RegistryError::validation(
+                            "every ZooKeeper ACL entry must grant at least one permission",
+                        ));
+                    }
+                    let mut permissions = BTreeSet::new();
+                    for permission in &entry.permissions {
+                        let normalized = permission.trim().to_ascii_lowercase();
+                        if !matches!(
+                            normalized.as_str(),
+                            "read" | "write" | "create" | "delete" | "admin"
+                        ) {
+                            return Err(RegistryError::validation(format!(
+                                "unsupported ZooKeeper ACL permission: {permission}"
+                            )));
+                        }
+                        if !permissions.insert(normalized.clone()) {
+                            return Err(RegistryError::validation(
+                                "ZooKeeper ACL entry contains a duplicate permission",
+                            ));
+                        }
+                        has_admin |= normalized == "admin";
+                    }
+                }
+                if !has_admin {
+                    return Err(RegistryError::validation(
+                        "ZooKeeper ACL must keep at least one ADMIN identity to avoid an unrecoverable ACL",
+                    ));
+                }
+            }
+            Self::Create { address, value, .. } => {
+                validate_mutation_address(address)?;
+                value.decoded()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn address(&self) -> &ResourceAddress {
+        match self {
+            Self::SetAcl { address, .. } | Self::Create { address, .. } => address,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ZookeeperNativeActionResult {
+    SetAcl {
+        address: ResourceAddress,
+        previous_acl_version: i32,
+        current_acl_version: i32,
+        previous_entries: Vec<ZookeeperAclEntry>,
+        current_entries: Vec<ZookeeperAclEntry>,
+        consistency: MutationConsistency,
+    },
+    Create {
+        requested_address: ResourceAddress,
+        address: ResourceAddress,
+        mode: ZookeeperCreateMode,
+        sequence: Option<String>,
+        current: ResourceSnapshot,
+        consistency: MutationConsistency,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -382,6 +947,159 @@ pub enum NativeResourceInfo {
         address: ResourceAddress,
         acl_version: i32,
         entries: Vec<ZookeeperAclEntry>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum EtcdLeaseAction {
+    GrantAndAttach {
+        address: ResourceAddress,
+        expected_version: String,
+        ttl_seconds: i64,
+    },
+    Attach {
+        address: ResourceAddress,
+        expected_version: String,
+        lease_id: String,
+    },
+    Detach {
+        address: ResourceAddress,
+        expected_version: String,
+    },
+    KeepAlive {
+        address: ResourceAddress,
+        lease_id: String,
+    },
+    Revoke {
+        address: ResourceAddress,
+        expected_version: String,
+        lease_id: String,
+    },
+}
+
+impl EtcdLeaseAction {
+    pub fn validate(&self) -> Result<(), RegistryError> {
+        let ResourceAddress::Etcd { key_base64 } = self.address() else {
+            return Err(RegistryError::validation(
+                "etcd lease actions require an exact etcd key",
+            ));
+        };
+        let key = STANDARD
+            .decode(key_base64)
+            .map_err(|_| RegistryError::validation("etcd key is not valid base64"))?;
+        if key.is_empty() {
+            return Err(RegistryError::validation("etcd key cannot be empty"));
+        }
+        if let Some(expected_version) = self.expected_version() {
+            parse_positive_i64(expected_version, "etcd mod revision")?;
+        }
+        if let Some(lease_id) = self.lease_id() {
+            parse_positive_i64(lease_id, "etcd lease id")?;
+        }
+        if let Self::GrantAndAttach { ttl_seconds, .. } = self
+            && *ttl_seconds <= 0
+        {
+            return Err(RegistryError::validation(
+                "etcd lease TTL must be a positive number of seconds",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn address(&self) -> &ResourceAddress {
+        match self {
+            Self::GrantAndAttach { address, .. }
+            | Self::Attach { address, .. }
+            | Self::Detach { address, .. }
+            | Self::KeepAlive { address, .. }
+            | Self::Revoke { address, .. } => address,
+        }
+    }
+
+    pub fn expected_version(&self) -> Option<&str> {
+        match self {
+            Self::GrantAndAttach {
+                expected_version, ..
+            }
+            | Self::Attach {
+                expected_version, ..
+            }
+            | Self::Detach {
+                expected_version, ..
+            }
+            | Self::Revoke {
+                expected_version, ..
+            } => Some(expected_version),
+            Self::KeepAlive { .. } => None,
+        }
+    }
+
+    pub fn lease_id(&self) -> Option<&str> {
+        match self {
+            Self::Attach { lease_id, .. }
+            | Self::KeepAlive { lease_id, .. }
+            | Self::Revoke { lease_id, .. } => Some(lease_id),
+            Self::GrantAndAttach { .. } | Self::Detach { .. } => None,
+        }
+    }
+}
+
+fn parse_positive_i64(value: &str, label: &str) -> Result<i64, RegistryError> {
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| RegistryError::validation(format!("{label} must be a positive integer")))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "action",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum EtcdLeaseActionResult {
+    GrantAndAttach {
+        address: ResourceAddress,
+        lease_id: String,
+        remaining_ttl_seconds: i64,
+        granted_ttl_seconds: i64,
+        previous: ResourceSnapshot,
+        current: ResourceSnapshot,
+        consistency: MutationConsistency,
+    },
+    Attach {
+        address: ResourceAddress,
+        lease_id: String,
+        remaining_ttl_seconds: i64,
+        granted_ttl_seconds: i64,
+        previous: ResourceSnapshot,
+        current: ResourceSnapshot,
+        consistency: MutationConsistency,
+    },
+    Detach {
+        address: ResourceAddress,
+        previous_lease_id: String,
+        previous: ResourceSnapshot,
+        current: ResourceSnapshot,
+        consistency: MutationConsistency,
+    },
+    KeepAlive {
+        address: ResourceAddress,
+        lease_id: String,
+        remaining_ttl_seconds: i64,
+    },
+    Revoke {
+        address: ResourceAddress,
+        lease_id: String,
+        previous: ResourceSnapshot,
+        consistency: MutationConsistency,
     },
 }
 
@@ -617,6 +1335,100 @@ pub enum ResourceMutation {
         address: ResourceAddress,
         expected_version: String,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdTransaction {
+    pub mutations: Vec<ResourceMutation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EtcdTransactionResult {
+    pub revision: String,
+    pub results: Vec<MutationResult>,
+}
+
+impl EtcdTransaction {
+    const MAX_MUTATIONS: usize = 32;
+
+    pub fn validate(&self) -> Result<(), RegistryError> {
+        if !(2..=Self::MAX_MUTATIONS).contains(&self.mutations.len()) {
+            return Err(RegistryError::validation(format!(
+                "etcd transaction requires between 2 and {} mutations",
+                Self::MAX_MUTATIONS
+            )));
+        }
+
+        let mut keys = BTreeSet::new();
+        let mut payload_bytes = 0usize;
+        for mutation in &self.mutations {
+            mutation.validate()?;
+            let ResourceAddress::Etcd { key_base64 } = mutation.address() else {
+                return Err(RegistryError::validation(
+                    "etcd transactions can only mutate exact etcd keys",
+                ));
+            };
+            let key = STANDARD
+                .decode(key_base64)
+                .map_err(|_| RegistryError::validation("etcd key is not valid base64"))?;
+            let key_bytes = key.len();
+            if !keys.insert(key) {
+                return Err(RegistryError::validation(
+                    "etcd transaction contains a duplicate key",
+                ));
+            }
+            add_transaction_payload(&mut payload_bytes, key_bytes)?;
+            match mutation {
+                ResourceMutation::Create {
+                    value,
+                    content_type,
+                    ..
+                } => {
+                    add_transaction_payload(&mut payload_bytes, value.decoded()?.len())?;
+                    add_transaction_payload(
+                        &mut payload_bytes,
+                        content_type.as_deref().map_or(0, str::len),
+                    )?;
+                }
+                ResourceMutation::Update {
+                    value,
+                    content_type,
+                    expected_version,
+                    ..
+                } => {
+                    add_transaction_payload(&mut payload_bytes, value.decoded()?.len())?;
+                    add_transaction_payload(
+                        &mut payload_bytes,
+                        content_type.as_deref().map_or(0, str::len),
+                    )?;
+                    add_transaction_payload(&mut payload_bytes, expected_version.len())?;
+                }
+                ResourceMutation::Delete {
+                    expected_version, ..
+                } => add_transaction_payload(&mut payload_bytes, expected_version.len())?,
+            }
+        }
+        if payload_bytes > EncodedValue::MAX_INLINE_BYTES {
+            return Err(RegistryError::new(
+                RegistryErrorCode::ValueTooLarge,
+                format!(
+                    "transaction payload totals {payload_bytes} bytes; the safety limit is {} bytes",
+                    EncodedValue::MAX_INLINE_BYTES
+                ),
+                false,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn add_transaction_payload(total: &mut usize, bytes: usize) -> Result<(), RegistryError> {
+    *total = total
+        .checked_add(bytes)
+        .ok_or_else(|| RegistryError::validation("transaction payload is too large"))?;
+    Ok(())
 }
 
 impl ResourceMutation {
@@ -1027,9 +1839,20 @@ impl RegistryCatalog {
                     Capability::Delete,
                 ];
                 match id {
-                    AdapterId::Etcd => capabilities.push(Capability::Lease),
-                    AdapterId::Zookeeper => capabilities.push(Capability::Acl),
-                    AdapterId::Nacos => capabilities.push(Capability::History),
+                    AdapterId::Etcd => {
+                        capabilities.push(Capability::Lease);
+                        capabilities.push(Capability::Transaction);
+                    }
+                    AdapterId::Zookeeper => {
+                        capabilities.push(Capability::Acl);
+                        capabilities.push(Capability::Ephemeral);
+                    }
+                    AdapterId::Nacos => {
+                        capabilities.push(Capability::History);
+                        capabilities.push(Capability::Namespace);
+                        capabilities.push(Capability::Service);
+                        capabilities.push(Capability::Instance);
+                    }
                 }
                 AdapterDescriptor {
                     id,
@@ -1276,6 +2099,136 @@ impl RegistryService {
         .await
     }
 
+    pub async fn list_nacos_namespaces(
+        &self,
+        connection_id: &str,
+    ) -> Result<Vec<NacosNamespace>, RegistryError> {
+        self.session(connection_id)
+            .await?
+            .list_nacos_namespaces()
+            .await
+    }
+
+    pub async fn list_nacos_namespaces_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+    ) -> Result<Vec<NacosNamespace>, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            service.list_nacos_namespaces(&connection_id).await
+        })
+        .await
+    }
+
+    pub async fn list_nacos_services(
+        &self,
+        connection_id: &str,
+        group: String,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> Result<NacosServicePage, RegistryError> {
+        self.session(connection_id)
+            .await?
+            .list_nacos_services(group, cursor, limit.clamp(1, 100))
+            .await
+    }
+
+    pub async fn list_nacos_services_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        group: String,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> Result<NacosServicePage, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            service
+                .list_nacos_services(&connection_id, group, cursor, limit)
+                .await
+        })
+        .await
+    }
+
+    pub async fn read_nacos_service(
+        &self,
+        connection_id: &str,
+        group: String,
+        service_name: String,
+    ) -> Result<NacosService, RegistryError> {
+        self.session(connection_id)
+            .await?
+            .read_nacos_service(group, service_name)
+            .await
+    }
+
+    pub async fn read_nacos_service_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        group: String,
+        service_name: String,
+    ) -> Result<NacosService, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            service
+                .read_nacos_service(&connection_id, group, service_name)
+                .await
+        })
+        .await
+    }
+
+    pub async fn list_nacos_instances(
+        &self,
+        connection_id: &str,
+        group: String,
+        service_name: String,
+    ) -> Result<Vec<NacosInstance>, RegistryError> {
+        self.session(connection_id)
+            .await?
+            .list_nacos_instances(group, service_name)
+            .await
+    }
+
+    pub async fn list_nacos_instances_cancellable(
+        &self,
+        operation_id: OperationId,
+        connection_id: String,
+        group: String,
+        service_name: String,
+    ) -> Result<Vec<NacosInstance>, RegistryError> {
+        let service = self.clone();
+        self.run_operation(operation_id, async move {
+            service
+                .list_nacos_instances(&connection_id, group, service_name)
+                .await
+        })
+        .await
+    }
+
+    pub async fn execute_nacos_native_action(
+        &self,
+        connection_id: &str,
+        action: NacosNativeAction,
+    ) -> Result<NacosNativeActionResult, RegistryError> {
+        self.execute_nacos_native_action_with_phase(connection_id, action, MutationPhase::default())
+            .await
+    }
+
+    pub(crate) async fn execute_nacos_native_action_with_phase(
+        &self,
+        connection_id: &str,
+        mut action: NacosNativeAction,
+        phase: MutationPhase,
+    ) -> Result<NacosNativeActionResult, RegistryError> {
+        action.validate()?;
+        self.session(connection_id)
+            .await?
+            .execute_nacos_native_action(action, phase)
+            .await
+    }
+
     pub async fn inspect_native_cancellable(
         &self,
         operation_id: OperationId,
@@ -1292,10 +2245,28 @@ impl RegistryService {
         }
         let service = self.clone();
         self.run_operation(operation_id, async move {
-            let session = service.session(&connection_id).await?;
-            session.inspect_native(address).await
+            service.inspect_native(&connection_id, address).await
         })
         .await
+    }
+
+    pub async fn inspect_native(
+        &self,
+        connection_id: &str,
+        address: ResourceAddress,
+    ) -> Result<NativeResourceInfo, RegistryError> {
+        if !matches!(
+            &address,
+            ResourceAddress::Etcd { .. } | ResourceAddress::Zookeeper { .. }
+        ) {
+            return Err(RegistryError::unsupported(
+                "native inspection requires an etcd key or ZooKeeper znode",
+            ));
+        }
+        self.session(connection_id)
+            .await?
+            .inspect_native(address)
+            .await
     }
 
     pub async fn mutate(
@@ -1333,6 +2304,74 @@ impl RegistryService {
                 .await
         })
         .await
+    }
+
+    pub async fn execute_etcd_transaction(
+        &self,
+        connection_id: &str,
+        transaction: EtcdTransaction,
+    ) -> Result<EtcdTransactionResult, RegistryError> {
+        self.execute_etcd_transaction_with_phase(
+            connection_id,
+            transaction,
+            MutationPhase::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_etcd_transaction_with_phase(
+        &self,
+        connection_id: &str,
+        transaction: EtcdTransaction,
+        phase: MutationPhase,
+    ) -> Result<EtcdTransactionResult, RegistryError> {
+        transaction.validate()?;
+        let session = self.session(connection_id).await?;
+        session.execute_etcd_transaction(transaction, phase).await
+    }
+
+    pub async fn execute_etcd_lease_action(
+        &self,
+        connection_id: &str,
+        action: EtcdLeaseAction,
+    ) -> Result<EtcdLeaseActionResult, RegistryError> {
+        self.execute_etcd_lease_action_with_phase(connection_id, action, MutationPhase::default())
+            .await
+    }
+
+    pub(crate) async fn execute_etcd_lease_action_with_phase(
+        &self,
+        connection_id: &str,
+        action: EtcdLeaseAction,
+        phase: MutationPhase,
+    ) -> Result<EtcdLeaseActionResult, RegistryError> {
+        action.validate()?;
+        let session = self.session(connection_id).await?;
+        session.execute_etcd_lease_action(action, phase).await
+    }
+
+    pub async fn execute_zookeeper_native_action(
+        &self,
+        connection_id: &str,
+        action: ZookeeperNativeAction,
+    ) -> Result<ZookeeperNativeActionResult, RegistryError> {
+        self.execute_zookeeper_native_action_with_phase(
+            connection_id,
+            action,
+            MutationPhase::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_zookeeper_native_action_with_phase(
+        &self,
+        connection_id: &str,
+        action: ZookeeperNativeAction,
+        phase: MutationPhase,
+    ) -> Result<ZookeeperNativeActionResult, RegistryError> {
+        action.validate()?;
+        let session = self.session(connection_id).await?;
+        session.execute_zookeeper_native_action(action, phase).await
     }
 
     pub(crate) async fn run_mutation_workflow<T>(
@@ -1562,11 +2601,203 @@ impl RegistryService {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
     use super::{
-        MutationPhase, NativeResourceInfo, OperationId, RegistryError, RegistryErrorCode,
-        RegistryService, ResourceAddress, ResourceMutation, ResourceSearchRequest, SubscriptionId,
-        WatchChangeKind, WatchEvent, WatchRequest, WatchStatusState,
+        EncodedValue, EtcdLeaseAction, EtcdTransaction, MutationPhase, NacosNativeAction,
+        NativeResourceInfo, OperationId, RegistryError, RegistryErrorCode, RegistryService,
+        ResourceAddress, ResourceMutation, ResourceSearchRequest, SubscriptionId, WatchChangeKind,
+        WatchEvent, WatchRequest, WatchStatusState, ZookeeperNativeAction,
     };
+
+    #[test]
+    fn nacos_native_contract_bounds_metadata_and_requires_conditional_fingerprints() {
+        let mut action: NacosNativeAction = serde_json::from_value(serde_json::json!({
+            "action": "updateInstance",
+            "group": " DEFAULT_GROUP ",
+            "serviceName": "payments",
+            "cluster": "DEFAULT",
+            "ip": "127.0.0.1",
+            "port": 8080,
+            "weight": 1.0,
+            "enabled": true,
+            "ephemeral": false,
+            "metadata": { "zone": "east" },
+            "expectedFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }))
+        .expect("camelCase Nacos native action should deserialize");
+        action
+            .validate()
+            .expect("bounded instance update should be valid");
+
+        let mut unsafe_delete: NacosNativeAction = serde_json::from_value(serde_json::json!({
+            "action": "deleteNamespace",
+            "namespaceId": "public",
+            "expectedFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }))
+        .expect("public delete should deserialize before validation");
+        assert_eq!(
+            unsafe_delete.validate().unwrap_err().code,
+            RegistryErrorCode::Validation
+        );
+
+        let mut ephemeral_instance: NacosNativeAction = serde_json::from_value(serde_json::json!({
+            "action": "registerInstance",
+            "group": "DEFAULT_GROUP",
+            "serviceName": "payments",
+            "cluster": "DEFAULT",
+            "ip": "127.0.0.1",
+            "port": 8080,
+            "weight": 1.0,
+            "enabled": true,
+            "ephemeral": true,
+            "metadata": {}
+        }))
+        .expect("ephemeral instance should deserialize before validation");
+        ephemeral_instance
+            .validate()
+            .expect("ephemeral instances are managed by the Naming SDK heartbeat");
+    }
+
+    #[test]
+    fn zookeeper_native_contract_requires_versioned_admin_acl_and_bounded_create_value() {
+        let action: ZookeeperNativeAction = serde_json::from_value(serde_json::json!({
+            "action": "setAcl",
+            "address": { "type": "zookeeper", "path": "/atlas/key" },
+            "expectedAclVersion": 3,
+            "entries": [{
+                "scheme": "world",
+                "id": "anyone",
+                "permissions": ["read", "admin"]
+            }]
+        }))
+        .expect("camelCase ZooKeeper ACL action should deserialize");
+        action
+            .validate()
+            .expect("versioned ACL retaining ADMIN should be valid");
+
+        let lockout: ZookeeperNativeAction = serde_json::from_value(serde_json::json!({
+            "action": "setAcl",
+            "address": { "type": "zookeeper", "path": "/atlas/key" },
+            "expectedAclVersion": 3,
+            "entries": [{
+                "scheme": "world",
+                "id": "anyone",
+                "permissions": ["read"]
+            }]
+        }))
+        .expect("unsafe ACL should deserialize before validation");
+        assert_eq!(
+            lockout.validate().unwrap_err().code,
+            RegistryErrorCode::Validation
+        );
+
+        let ephemeral: ZookeeperNativeAction = serde_json::from_value(serde_json::json!({
+            "action": "create",
+            "address": { "type": "zookeeper", "path": "/atlas/member-" },
+            "value": { "content": "online", "encoding": "utf8" },
+            "mode": "ephemeralSequential"
+        }))
+        .expect("native create should deserialize");
+        ephemeral
+            .validate()
+            .expect("bounded ephemeral create should be valid");
+    }
+
+    #[test]
+    fn etcd_lease_action_contract_keeps_ids_lossless_and_validates_key_safety() {
+        let action: EtcdLeaseAction = serde_json::from_value(serde_json::json!({
+            "action": "attach",
+            "address": { "type": "etcd", "keyBase64": "L2F0bGFzL2tleQ==" },
+            "expectedVersion": "42",
+            "leaseId": "9223372036854775807"
+        }))
+        .expect("camelCase lease action should deserialize");
+        action
+            .validate()
+            .expect("positive 64-bit lease id should be lossless");
+
+        let invalid: EtcdLeaseAction = serde_json::from_value(serde_json::json!({
+            "action": "grantAndAttach",
+            "address": { "type": "zookeeper", "path": "/atlas/key" },
+            "expectedVersion": "7",
+            "ttlSeconds": 60
+        }))
+        .expect("adapter mismatch should deserialize before validation");
+        assert_eq!(
+            invalid.validate().unwrap_err().code,
+            RegistryErrorCode::Validation
+        );
+    }
+
+    #[test]
+    fn etcd_transaction_contract_is_bounded_and_rejects_duplicate_keys() {
+        let transaction: EtcdTransaction = serde_json::from_value(serde_json::json!({
+            "mutations": [
+                {
+                    "operation": "create",
+                    "address": { "type": "etcd", "keyBase64": "L2F0bGFzL2E=" },
+                    "value": { "content": "first", "encoding": "utf8" }
+                },
+                {
+                    "operation": "update",
+                    "address": { "type": "etcd", "keyBase64": "L2F0bGFzL2I=" },
+                    "value": { "content": "second", "encoding": "utf8" },
+                    "expectedVersion": "42"
+                }
+            ]
+        }))
+        .expect("camelCase transaction should deserialize");
+        transaction
+            .validate()
+            .expect("two distinct etcd keys are valid");
+
+        let duplicate: EtcdTransaction = serde_json::from_value(serde_json::json!({
+            "mutations": [
+                {
+                    "operation": "delete",
+                    "address": { "type": "etcd", "keyBase64": "L2F0bGFzL2E=" },
+                    "expectedVersion": "7"
+                },
+                {
+                    "operation": "update",
+                    "address": { "type": "etcd", "keyBase64": "L2F0bGFzL2E=" },
+                    "value": { "content": "replacement", "encoding": "utf8" },
+                    "expectedVersion": "7"
+                }
+            ]
+        }))
+        .expect("duplicate transaction should deserialize before validation");
+        let error = duplicate
+            .validate()
+            .expect_err("one key cannot be written twice");
+        assert_eq!(error.code, RegistryErrorCode::Validation);
+        assert!(error.message.contains("duplicate"));
+
+        let oversized_keys = EtcdTransaction {
+            mutations: vec![
+                ResourceMutation::Delete {
+                    address: ResourceAddress::Etcd {
+                        key_base64: STANDARD.encode(vec![b'k'; EncodedValue::MAX_INLINE_BYTES]),
+                    },
+                    expected_version: "1".to_owned(),
+                },
+                ResourceMutation::Delete {
+                    address: ResourceAddress::Etcd {
+                        key_base64: STANDARD.encode(b"second"),
+                    },
+                    expected_version: "2".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(
+            oversized_keys
+                .validate()
+                .expect_err("keys and versions count toward the transaction payload")
+                .code,
+            RegistryErrorCode::ValueTooLarge
+        );
+    }
 
     #[test]
     fn native_lease_contract_keeps_the_64_bit_identifier_lossless() {

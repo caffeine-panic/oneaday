@@ -4,6 +4,7 @@ import type {
   ConnectionProfile,
   ResourceAddress,
   ResourceMutation,
+  ZookeeperCreateMode,
 } from "./registry";
 
 export type NewResourceDraft = {
@@ -12,6 +13,7 @@ export type NewResourceDraft = {
   dataId: string;
   content: string;
   contentType: string;
+  zookeeperMode: "persistent" | ZookeeperCreateMode;
 };
 
 type NewResourceDialogProps = {
@@ -44,9 +46,17 @@ export function NewResourceDialog({
         ) : (
           <label>{adapter === "etcd" ? "Key" : "ZNode 路径"}<input autoFocus value={draft.keyOrPath} onChange={(event) => onChange({ ...draft, keyOrPath: event.target.value })} placeholder={adapter === "etcd" ? "/services/payment/config" : "/services/payment"} /></label>
         )}
+        {adapter === "zookeeper" && <label>节点模式
+          <select value={draft.zookeeperMode} onChange={(event) => onChange({ ...draft, zookeeperMode: event.target.value as NewResourceDraft["zookeeperMode"] })}>
+            <option value="persistent">持久节点</option>
+            <option value="persistentSequential">持久顺序节点</option>
+            <option value="ephemeral">临时节点</option>
+            <option value="ephemeralSequential">临时顺序节点</option>
+          </select>
+        </label>}
         <label>内容类型<input value={draft.contentType} onChange={(event) => onChange({ ...draft, contentType: event.target.value })} placeholder="text / json / yaml" /></label>
         <label>初始内容<textarea value={draft.content} onChange={(event) => onChange({ ...draft, content: event.target.value })} spellCheck={false} /></label>
-        <p className="form-note">创建会先检查资源是否存在。etcd 与 ZooKeeper 使用原子 create；当前 ZooKeeper 创建仅支持继承父 ACL 的持久节点，ephemeral/sequential 将作为原生能力单独提供；Nacos 创建是检查后发布，确认页会明确提示竞争窗口。</p>
+        <p className="form-note">创建会先检查资源是否存在。etcd 与 ZooKeeper 使用原子 create；ZooKeeper 节点继承父 ACL，临时节点由当前桌面连接的长生命周期 session 持有；Nacos 创建是检查后发布，确认页会明确提示竞争窗口。</p>
         <div className="dialog-actions">
           <button className="button" onClick={onCancel}>取消</button>
           <button className="button primary" onClick={onContinue}>查看影响并确认</button>

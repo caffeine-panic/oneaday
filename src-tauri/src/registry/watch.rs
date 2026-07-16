@@ -10,13 +10,13 @@ use zookeeper_client::{EventType as ZookeeperEventType, SessionState, WatchedEve
 use super::{
     RegistryError, ResourceAddress, SubscriptionId, WatchChangeKind, WatchEvent, WatchRequest,
     WatchStatusState,
-    adapters::{NacosSession, RegistrySession},
+    adapters::{NacosSession, RegistrySession, read_nacos_authoritative},
 };
 
 const INITIAL_RETRY: Duration = Duration::from_millis(250);
 const MAX_RETRY: Duration = Duration::from_secs(5);
 const LISTENER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(8);
-const NACOS_HEALTH_INTERVAL: Duration = Duration::from_secs(15);
+const NACOS_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(super) async fn run(
     session: RegistrySession,
@@ -414,9 +414,10 @@ async fn watch_nacos(
             ));
         }
     };
+    let address = request.address;
     let (latest, mut changes) = watch::channel(None);
     let listener: Arc<dyn ConfigChangeListener> = Arc::new(LatestNacosListener {
-        address: request.address,
+        address: address.clone(),
         latest,
     });
     let registration = session
@@ -436,10 +437,12 @@ async fn watch_nacos(
         () = token.cancelled() => {
             return cleanup_nacos_listener(session, data_id, group, listener).await;
         }
-        result = session.probe_remote() => result,
+        result = nacos_watch_version(&session, &data_id, &group) => result,
     };
+    let mut last_version = None;
     let mut remote_live = match initial_probe {
-        Ok(()) => {
+        Ok(version) => {
+            last_version = version;
             if !status(
                 &events,
                 &subscription_id,
@@ -482,22 +485,37 @@ async fn watch_nacos(
             _ = heartbeat.tick() => {
                 let probe = tokio::select! {
                     () = token.cancelled() => break,
-                    result = session.probe_remote() => result,
+                    result = nacos_watch_version(&session, &data_id, &group) => result,
                 };
                 match probe {
-                    Ok(()) if !remote_live => {
-                        remote_live = true;
-                        if !status(
-                            &events,
-                            &subscription_id,
-                            WatchStatusState::Live,
-                            None,
-                            None,
-                        ).await {
-                            break;
+                    Ok(version) => {
+                        if !remote_live {
+                            remote_live = true;
+                            if !status(
+                                &events,
+                                &subscription_id,
+                                WatchStatusState::Live,
+                                None,
+                                None,
+                            ).await {
+                                break;
+                            }
+                        }
+                        if let Some(change) = nacos_reconciled_change(
+                            last_version.as_deref(),
+                            version.as_deref(),
+                        ) {
+                            last_version = version.clone();
+                            if events.send(WatchEvent::Change {
+                                subscription_id: subscription_id.as_str().to_owned(),
+                                change,
+                                address: address.clone(),
+                                version,
+                            }).await.is_err() {
+                                break;
+                            }
                         }
                     }
-                    Ok(()) => {}
                     Err(error) if error.retryable => {
                         remote_live = false;
                         if !reconnecting(
@@ -533,19 +551,57 @@ async fn watch_nacos(
                     }
                 }
                 if let Some(change) = change
-                    && events.send(WatchEvent::Change {
+                    && nacos_reconciled_change(
+                        last_version.as_deref(),
+                        change.version.as_deref(),
+                    ).is_some()
+                {
+                    last_version = change.version.clone();
+                    if events.send(WatchEvent::Change {
                         subscription_id: subscription_id.as_str().to_owned(),
                         change: WatchChangeKind::Updated,
                         address: change.address,
                         version: change.version,
                     }).await.is_err() {
-                    break;
+                        break;
+                    }
                 }
             }
         }
     }
     cleanup_nacos_listener(session, data_id, group, listener).await?;
     terminal_error.map_or(Ok(()), Err)
+}
+
+async fn nacos_watch_version(
+    session: &NacosSession,
+    data_id: &str,
+    group: &str,
+) -> Result<Option<String>, RegistryError> {
+    match read_nacos_authoritative(session, data_id, group).await {
+        Ok(response) => Ok(Some(response.md5().clone())),
+        Err(error) if error.code == super::RegistryErrorCode::NotFound => Ok(None),
+        Err(mut error) => {
+            error.message = format!(
+                "Nacos authoritative watch reconciliation failed: {}",
+                error.message
+            );
+            Err(error)
+        }
+    }
+}
+
+fn nacos_reconciled_change(
+    previous: Option<&str>,
+    current: Option<&str>,
+) -> Option<WatchChangeKind> {
+    if previous == current {
+        None
+    } else if current.is_none() {
+        Some(WatchChangeKind::Deleted)
+    } else {
+        Some(WatchChangeKind::Updated)
+    }
 }
 
 async fn cleanup_nacos_listener(
@@ -687,8 +743,8 @@ mod tests {
     use zookeeper_client::{EventType, WatchedEvent};
 
     use super::{
-        LatestNacosListener, WatchChangeKind, etcd_watch_error, retryable_etcd_watch_error,
-        zookeeper_change,
+        LatestNacosListener, WatchChangeKind, etcd_watch_error, nacos_reconciled_change,
+        retryable_etcd_watch_error, zookeeper_change,
     };
     use crate::registry::{RegistryErrorCode, ResourceAddress};
 
@@ -727,6 +783,20 @@ mod tests {
         assert_eq!(change.version.as_deref(), Some("safe-md5"));
         let debug = serde_json::to_string(&change.address).unwrap();
         assert!(!debug.contains("must-not-cross"));
+    }
+
+    #[test]
+    fn nacos_reconciliation_deduplicates_versions_and_detects_deletion() {
+        assert_eq!(
+            nacos_reconciled_change(Some("old"), Some("new")),
+            Some(WatchChangeKind::Updated)
+        );
+        assert_eq!(nacos_reconciled_change(Some("same"), Some("same")), None);
+        assert_eq!(
+            nacos_reconciled_change(Some("old"), None),
+            Some(WatchChangeKind::Deleted)
+        );
+        assert_eq!(nacos_reconciled_change(None, None), None);
     }
 
     #[test]

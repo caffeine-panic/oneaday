@@ -24,7 +24,12 @@ export type AdapterDescriptor = {
     | "delete"
     | "history"
     | "lease"
+    | "transaction"
     | "acl"
+    | "ephemeral"
+    | "namespace"
+    | "service"
+    | "instance"
   >;
 };
 
@@ -77,6 +82,11 @@ export type ConnectionSession = {
 export type ConnectionProbe = {
   adapter: AdapterId;
   endpoint: string;
+};
+
+export type DiagnosticExportReceipt = {
+  fileName: string;
+  connectionCount: number;
 };
 
 export type ResourceAddress =
@@ -143,12 +153,112 @@ export type NativeResourceInfo =
       kind: "zookeeperAcl";
       address: ResourceAddress;
       aclVersion: number;
-      entries: Array<{
-        scheme: string;
-        id: string;
-        permissions: string[];
-      }>;
+      entries: ZookeeperAclEntry[];
     };
+
+export type ZookeeperAclPermission = "read" | "write" | "create" | "delete" | "admin";
+
+export type ZookeeperAclEntry = {
+  scheme: string;
+  id: string;
+  permissions: ZookeeperAclPermission[];
+};
+
+export type ZookeeperCreateMode =
+  | "persistentSequential"
+  | "ephemeral"
+  | "ephemeralSequential";
+
+export type ZookeeperNativeAction =
+  | {
+      action: "setAcl";
+      address: ResourceAddress;
+      expectedAclVersion: number;
+      entries: ZookeeperAclEntry[];
+    }
+  | {
+      action: "create";
+      address: ResourceAddress;
+      value: MutationValue;
+      mode: ZookeeperCreateMode;
+    };
+
+export type ZookeeperNativeActionResult =
+  | {
+      action: "setAcl";
+      address: ResourceAddress;
+      previousAclVersion: number;
+      currentAclVersion: number;
+      previousEntries: ZookeeperAclEntry[];
+      currentEntries: ZookeeperAclEntry[];
+      consistency: "atomic";
+    }
+  | {
+      action: "create";
+      requestedAddress: ResourceAddress;
+      address: ResourceAddress;
+      mode: ZookeeperCreateMode;
+      sequence?: string;
+      current: ResourceSnapshot;
+      consistency: "atomic";
+    };
+
+export type NacosNamespace = {
+  id: string;
+  name: string;
+  description: string;
+  configCount: number;
+  fingerprint: string;
+};
+
+export type NacosService = {
+  namespaceId: string;
+  group: string;
+  name: string;
+  protectThreshold: number;
+  ephemeral: boolean;
+  metadata: Record<string, string>;
+  fingerprint: string;
+};
+
+export type NacosServicePage = {
+  items: NacosService[];
+  nextCursor?: string;
+};
+
+export type NacosInstance = {
+  namespaceId: string;
+  group: string;
+  serviceName: string;
+  cluster: string;
+  ip: string;
+  port: number;
+  weight: number;
+  healthy: boolean;
+  enabled: boolean;
+  ephemeral: boolean;
+  metadata: Record<string, string>;
+  fingerprint: string;
+};
+
+export type NacosNativeAction =
+  | { action: "createNamespace"; namespaceId: string; name: string; description: string }
+  | { action: "updateNamespace"; namespaceId: string; name: string; description: string; expectedFingerprint: string }
+  | { action: "deleteNamespace"; namespaceId: string; expectedFingerprint: string }
+  | { action: "createService"; group: string; serviceName: string; protectThreshold: number; ephemeral: boolean; metadata: Record<string, string> }
+  | { action: "updateService"; group: string; serviceName: string; protectThreshold: number; ephemeral: boolean; metadata: Record<string, string>; expectedFingerprint: string }
+  | { action: "deleteService"; group: string; serviceName: string; expectedFingerprint: string }
+  | { action: "registerInstance"; group: string; serviceName: string; cluster: string; ip: string; port: number; weight: number; enabled: boolean; ephemeral: boolean; metadata: Record<string, string> }
+  | { action: "updateInstance"; group: string; serviceName: string; cluster: string; ip: string; port: number; weight: number; enabled: boolean; ephemeral: boolean; metadata: Record<string, string>; expectedFingerprint: string }
+  | { action: "deregisterInstance"; group: string; serviceName: string; cluster: string; ip: string; port: number; ephemeral: boolean; expectedFingerprint: string };
+
+export type NacosNativeOperation = NacosNativeAction["action"];
+
+export type NacosNativeActionResult = {
+  operation: NacosNativeOperation;
+  target: string;
+  consistency: "checkedBeforeMutation";
+};
 
 export type ResourceDocument = {
   address: ResourceAddress;
@@ -169,9 +279,11 @@ export type RegistryError = {
   retryable: boolean;
 };
 
+export type ValueEncoding = "utf8" | "base64";
+
 export type MutationValue = {
   content: string;
-  encoding: "utf8" | "base64";
+  encoding: ValueEncoding;
 };
 
 export type ResourceMutation =
@@ -208,6 +320,78 @@ export type MutationResult = {
   current?: ResourceSnapshot;
   consistency: "atomic" | "checkedBeforeMutation";
 };
+
+export type EtcdTransaction = {
+  mutations: ResourceMutation[];
+};
+
+export type EtcdTransactionResult = {
+  revision: string;
+  results: MutationResult[];
+};
+
+export type EtcdLeaseAction =
+  | {
+      action: "grantAndAttach";
+      address: ResourceAddress;
+      expectedVersion: string;
+      ttlSeconds: number;
+    }
+  | {
+      action: "attach";
+      address: ResourceAddress;
+      expectedVersion: string;
+      leaseId: string;
+    }
+  | {
+      action: "detach";
+      address: ResourceAddress;
+      expectedVersion: string;
+    }
+  | {
+      action: "keepAlive";
+      address: ResourceAddress;
+      leaseId: string;
+    }
+  | {
+      action: "revoke";
+      address: ResourceAddress;
+      expectedVersion: string;
+      leaseId: string;
+    };
+
+export type EtcdLeaseActionResult =
+  | {
+      action: "grantAndAttach" | "attach";
+      address: ResourceAddress;
+      leaseId: string;
+      remainingTtlSeconds: number;
+      grantedTtlSeconds: number;
+      previous: ResourceSnapshot;
+      current: ResourceSnapshot;
+      consistency: "atomic";
+    }
+  | {
+      action: "detach";
+      address: ResourceAddress;
+      previousLeaseId: string;
+      previous: ResourceSnapshot;
+      current: ResourceSnapshot;
+      consistency: "atomic";
+    }
+  | {
+      action: "keepAlive";
+      address: ResourceAddress;
+      leaseId: string;
+      remainingTtlSeconds: number;
+    }
+  | {
+      action: "revoke";
+      address: ResourceAddress;
+      leaseId: string;
+      previous: ResourceSnapshot;
+      consistency: "checkedBeforeMutation";
+    };
 
 export type ExportReceipt = {
   fileName: string;
@@ -255,7 +439,27 @@ export type AuditHistoryItem = {
   connectionId: string;
   operationId: string;
   operation?: "create" | "update" | "delete";
+  nativeOperation?:
+    | "etcdLeaseGrantAndAttach"
+    | "etcdLeaseAttach"
+    | "etcdLeaseDetach"
+    | "etcdLeaseKeepAlive"
+    | "etcdLeaseRevoke"
+    | "zookeeperAclSet"
+    | "zookeeperPersistentSequentialCreate"
+    | "zookeeperEphemeralCreate"
+    | "zookeeperEphemeralSequentialCreate"
+    | "nacosCreateNamespace"
+    | "nacosUpdateNamespace"
+    | "nacosDeleteNamespace"
+    | "nacosCreateService"
+    | "nacosUpdateService"
+    | "nacosDeleteService"
+    | "nacosRegisterInstance"
+    | "nacosUpdateInstance"
+    | "nacosDeregisterInstance";
   address?: ResourceAddress;
+  nativeTarget?: string;
   expectedVersion?: string;
   previous?: ResourceSnapshot;
   current?: ResourceSnapshot;
@@ -305,6 +509,10 @@ export const ROOT_ADDRESS: ResourceAddress = { type: "root" };
 
 export function registryCapabilities() {
   return invoke<AdapterDescriptor[]>("registry_capabilities");
+}
+
+export function exportDiagnosticBundle() {
+  return invoke<DiagnosticExportReceipt | null>("export_diagnostic_bundle");
 }
 
 export function loadConnectionProfiles() {
@@ -434,6 +642,85 @@ export function mutateResource(
 ) {
   return invoke<MutationResult>("mutate_resource", {
     request: { connectionId, mutation, operationId },
+  });
+}
+
+export function executeEtcdTransaction(
+  connectionId: string,
+  transaction: EtcdTransaction,
+  operationId: string,
+) {
+  return invoke<EtcdTransactionResult>("execute_etcd_transaction", {
+    request: { connectionId, transaction, operationId, confirmed: true },
+  });
+}
+
+export function executeEtcdLeaseAction(
+  connectionId: string,
+  leaseAction: EtcdLeaseAction,
+  operationId: string,
+) {
+  return invoke<EtcdLeaseActionResult>("execute_etcd_lease_action", {
+    request: { connectionId, leaseAction, operationId, confirmed: true },
+  });
+}
+
+export function executeZookeeperNativeAction(
+  connectionId: string,
+  nativeAction: ZookeeperNativeAction,
+  operationId: string,
+) {
+  return invoke<ZookeeperNativeActionResult>("execute_zookeeper_native_action", {
+    request: { connectionId, nativeAction, operationId, confirmed: true },
+  });
+}
+
+export function listNacosNamespaces(connectionId: string, operationId: string) {
+  return invoke<NacosNamespace[]>("list_nacos_namespaces", {
+    request: { connectionId, operationId },
+  });
+}
+
+export function listNacosServices(
+  connectionId: string,
+  group: string,
+  operationId: string,
+  cursor?: string,
+) {
+  return invoke<NacosServicePage>("list_nacos_services", {
+    request: { connectionId, operationId, group, cursor, limit: 50 },
+  });
+}
+
+export function readNacosService(
+  connectionId: string,
+  group: string,
+  serviceName: string,
+  operationId: string,
+) {
+  return invoke<NacosService>("read_nacos_service", {
+    request: { connectionId, operationId, group, serviceName },
+  });
+}
+
+export function listNacosInstances(
+  connectionId: string,
+  group: string,
+  serviceName: string,
+  operationId: string,
+) {
+  return invoke<NacosInstance[]>("list_nacos_instances", {
+    request: { connectionId, operationId, group, serviceName },
+  });
+}
+
+export function executeNacosNativeAction(
+  connectionId: string,
+  nativeAction: NacosNativeAction,
+  operationId: string,
+) {
+  return invoke<NacosNativeActionResult>("execute_nacos_native_action", {
+    request: { connectionId, nativeAction, operationId, confirmed: true },
   });
 }
 

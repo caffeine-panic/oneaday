@@ -338,6 +338,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .mutation-warning { margin-top: 14px; padding: 12px; border: 1px solid #725b34; border-radius: 9px; color: #ffd28a; background: #1b1812; font-size: 12px; line-height: 1.55; }
 .production-confirmation { margin-top: 16px; padding: 13px; border: 1px solid #7d3f48; border-radius: 10px; background: #21151b; line-height: 1.55; }
 .production-confirmation b { display: inline; color: #ffb2b7; }
+.etcd-transaction-dialog { width: min(920px, 100%); max-height: calc(100vh - 48px); overflow: auto; }
+.transaction-summary { margin-bottom: 14px; }
+.transaction-items { display: grid; gap: 12px; }
+.transaction-item { padding: 14px; border: 1px solid #263447; border-radius: 11px; background: #0d151f; }
+.transaction-item-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 11px; }
+.transaction-item-heading b { color: #d7e2ee; }
+.transaction-item-heading .button { padding: 5px 9px; font-size: 11px; }
+.transaction-operation-grid { grid-template-columns: 190px minmax(240px, 1fr) 170px; }
+.transaction-item label { margin-bottom: 10px; }
+.transaction-item textarea { min-height: 92px; resize: vertical; font: 12px/1.55 "SFMono-Regular", Consolas, monospace; }
+.transaction-encoding { max-width: 190px; }
+.transaction-add { margin-top: 12px; }
 .transfer-dialog { width: min(680px, 100%); }
 .value-export {
   margin-top: 15px;
@@ -409,8 +421,41 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .acl-entry b { overflow-wrap: anywhere; color: #d7e2ee; }
 .acl-permissions { display: flex; flex-wrap: wrap; gap: 6px; }
 .acl-permissions span { padding: 4px 7px; border-radius: 5px; color: #7fe9d3; background: #123027; font-size: 10px; }
+.zookeeper-acl-dialog { width: min(860px, 100%); }
+.acl-editor-list { display: grid; gap: 10px; max-height: min(390px, calc(100vh - 470px)); margin: 14px 0 10px; overflow: auto; }
+.acl-editor-entry { padding: 13px; border: 1px solid #263447; border-radius: 10px; background: #0d151f; }
+.acl-editor-entry label { margin-bottom: 8px; }
+.acl-permission-editor { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.dialog .acl-permission-editor label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 11px; font-weight: 600; }
+.acl-permission-editor input { width: 15px; height: 15px; margin: 0; accent-color: #55d6be; }
+.compact-button { margin-left: auto; padding: 5px 9px; font-size: 10px; }
+.nacos-native-dialog { width: min(1040px, 100%); max-height: calc(100vh - 48px); overflow: auto; }
+.native-tabs { display: flex; gap: 6px; margin-bottom: 14px; padding: 5px; border-radius: 10px; background: #0b121c; }
+.native-tabs button { flex: 1; padding: 9px 12px; border: 0; border-radius: 7px; color: #91a0b2; background: transparent; cursor: pointer; }
+.native-tabs button.active { color: #dffcf5; background: #1a3a36; }
+.native-tabs button:disabled { opacity: .4; cursor: not-allowed; }
+.native-management-grid { display: grid; grid-template-columns: minmax(260px, .85fr) minmax(420px, 1.4fr); gap: 14px; min-height: 430px; }
+.native-object-list { display: grid; align-content: start; gap: 6px; max-height: 520px; padding: 10px; overflow: auto; border: 1px solid #263447; border-radius: 11px; background: #0b121c; }
+.native-object-list > button { display: grid; gap: 4px; width: 100%; padding: 10px 11px; border: 1px solid transparent; border-radius: 8px; color: #d7e2ee; background: #111b28; cursor: pointer; text-align: left; }
+.native-object-list > button:hover, .native-object-list > button.active { border-color: #3f617b; background: #17283b; }
+.native-object-list > button span { overflow: hidden; color: #8394a9; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.native-object-list > button.new-object { color: #7fe9d3; background: transparent; text-align: center; }
+.list-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.list-heading b { overflow: hidden; color: #b8c8d8; text-overflow: ellipsis; white-space: nowrap; }
+.list-heading input { min-width: 0; }
+.native-object-editor { padding: 16px; border: 1px solid #263447; border-radius: 11px; background: #0d151f; }
+.native-object-editor h3 { margin: 0 0 16px; color: #d7e2ee; }
+.native-object-editor textarea { min-height: 105px; resize: vertical; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; }
+.editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.instance-flags { display: flex; gap: 24px; }
+.native-confirm-panel { margin-top: 14px; padding: 14px; border: 1px solid #725b34; border-radius: 11px; background: #15140f; }
+.native-confirm-panel .mutation-warning { margin-top: 0; }
+.lease-dialog .native-summary { margin-bottom: 14px; }
+.lease-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+.danger-warning { border-color: #7d3f48; color: #ffb2b7; background: #21151b; }
 
 @media (max-width: 1100px) {
   .shell { grid-template-columns: 220px 290px 1fr; }
   .metadata { grid-template-columns: 1fr; }
+  .transaction-operation-grid { grid-template-columns: 1fr 1fr; }
 }

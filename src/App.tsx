@@ -7,8 +7,18 @@ import {
 import { ConnectionDialog, type ConnectionDialogMode } from "./ConnectionDialog";
 import { HistoryDialog } from "./HistoryDialog";
 import { NacosHistoryDialog } from "./NacosHistoryDialog";
-import { NativeInfoDialog } from "./NativeInfoDialog";
+import { NacosNativeDialog } from "./NacosNativeDialog";
+import { EtcdLeaseDialog } from "./EtcdLeaseDialog";
+import {
+  ZookeeperAclDialog,
+  ZookeeperCreateConfirmationDialog,
+} from "./ZookeeperNativeDialogs";
 import { ExportDialog, ImportPreviewDialog } from "./TransferDialogs";
+import {
+  EtcdTransactionDialog,
+  emptyEtcdTransactionItem,
+  type EtcdTransactionDraftItem,
+} from "./EtcdTransactionDialog";
 import {
   ROOT_ADDRESS,
   applyImport,
@@ -18,6 +28,10 @@ import {
   connectionEnvironmentLabels,
   deleteConnectionProfile,
   errorMessage,
+  executeEtcdLeaseAction,
+  executeEtcdTransaction,
+  executeZookeeperNativeAction,
+  exportDiagnosticBundle,
   exportResource,
   inspectNativeResource,
   isCancelled,
@@ -43,6 +57,8 @@ import {
   type AuditHistoryItem,
   type ConnectionProfile,
   type ConnectionSession,
+  type EtcdLeaseAction,
+  type EtcdTransaction,
   type ImportPreview,
   type NativeResourceInfo,
   type ResourceAddress,
@@ -54,6 +70,7 @@ import {
   type WatchEvent,
   type WatchHandle,
   type WatchStatusState,
+  type ZookeeperNativeAction,
 } from "./registry";
 
 type ResourceRow = {
@@ -136,6 +153,7 @@ const emptyResourceDraft = (adapter: AdapterId): NewResourceDraft => ({
   dataId: "",
   content: "",
   contentType: "text",
+  zookeeperMode: "persistent",
 });
 
 function pageRows(
@@ -225,6 +243,19 @@ function utf8Base64(value: string) {
   return btoa(binary);
 }
 
+function etcdAddressFromInput(rawInput: string): Extract<ResourceAddress, { type: "etcd" }> {
+  const input = rawInput.trim();
+  if (!input) throw new Error("etcd transaction key 不能为空");
+  if (!input.startsWith("base64:")) return { type: "etcd", keyBase64: utf8Base64(input) };
+  const keyBase64 = input.slice("base64:".length).trim();
+  try {
+    if (!keyBase64 || atob(keyBase64).length === 0) throw new Error();
+  } catch {
+    throw new Error("base64: 后面的 etcd transaction key 不是有效 Base64");
+  }
+  return { type: "etcd", keyBase64 };
+}
+
 function locateAddress(adapter: AdapterId, rawInput: string): ResourceAddress {
   const input = rawInput.trim();
   if (!input) throw new Error("请输入要定位的资源标识");
@@ -301,6 +332,12 @@ export function App() {
   const [nativeInfoOpen, setNativeInfoOpen] = useState(false);
   const [nativeInfo, setNativeInfo] = useState<NativeResourceInfo>();
   const [nativeInfoLoading, setNativeInfoLoading] = useState(false);
+  const [etcdTransactionOpen, setEtcdTransactionOpen] = useState(false);
+  const [etcdTransactionItems, setEtcdTransactionItems] = useState<EtcdTransactionDraftItem[]>([]);
+  const [etcdTransactionConfirmation, setEtcdTransactionConfirmation] = useState("");
+  const [pendingZookeeperAction, setPendingZookeeperAction] = useState<Extract<ZookeeperNativeAction, { action: "create" }>>();
+  const [zookeeperConfirmation, setZookeeperConfirmation] = useState("");
+  const [nacosNativeOpen, setNacosNativeOpen] = useState(false);
   const [resourceWatch, setResourceWatch] = useState<ResourceWatchView>();
   const watchHandle = useRef<WatchHandle | undefined>(undefined);
   const watchGeneration = useRef(0);
@@ -808,8 +845,8 @@ export function App() {
       address = { type: "etcd", keyBase64: utf8Base64(resourceDraft.keyOrPath) };
     } else if (selectedProfile.adapter === "zookeeper") {
       const path = resourceDraft.keyOrPath.trim();
-      if (!path.startsWith("/") || path === "/") {
-        setMessage("ZooKeeper 路径必须以 / 开头且不能是根节点");
+      if (!path.startsWith("/") || path === "/" || path.endsWith("/") || path.includes("//")) {
+        setMessage("ZooKeeper 路径必须是规范的绝对非根路径，且不能以 / 结尾");
         return;
       }
       address = { type: "zookeeper", path };
@@ -821,6 +858,17 @@ export function App() {
         return;
       }
       address = { type: "nacosConfig", group, dataId };
+    }
+    if (selectedProfile.adapter === "zookeeper" && resourceDraft.zookeeperMode !== "persistent") {
+      setPendingZookeeperAction({
+        action: "create",
+        address,
+        value: { content: resourceDraft.content, encoding: "utf8" },
+        mode: resourceDraft.zookeeperMode,
+      });
+      setZookeeperConfirmation("");
+      setCreateDialogOpen(false);
+      return;
     }
     setPendingMutation({
       operation: "create",
@@ -1040,6 +1088,20 @@ export function App() {
     void loadHistory(scope);
   };
 
+  const exportDiagnostics = async () => {
+    setBusy(true);
+    try {
+      const receipt = await exportDiagnosticBundle();
+      if (receipt) {
+        setMessage(`诊断包 ${receipt.fileName} 已导出；仅包含 ${receipt.connectionCount} 个连接的聚合计数，不含 endpoint、名称、value 或凭据`);
+      }
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const changeHistoryScope = (scope: string) => {
     setHistoryScope(scope);
     setHistoryItems([]);
@@ -1115,6 +1177,11 @@ export function App() {
     if (document.address.type !== "etcd" && document.address.type !== "zookeeper") return;
     setNativeInfo(undefined);
     setNativeInfoOpen(true);
+    if (document.address.type === "etcd"
+      && (!document.metadata.lease || document.metadata.lease === "0")) {
+      setNativeInfoLoading(false);
+      return;
+    }
     setNativeInfoLoading(true);
     setBusy(true);
     setMessage(undefined);
@@ -1131,6 +1198,215 @@ export function App() {
     } finally {
       finishOperation(operationId);
       setNativeInfoLoading(false);
+      setBusy(false);
+    }
+  };
+
+  const executeLeaseAction = async (action: EtcdLeaseAction) => {
+    if (!selectedSession || selectedProfile?.adapter !== "etcd" || busy) return;
+    setBusy(true);
+    setMessage(undefined);
+    const operationId = startOperation();
+    try {
+      const result = await executeEtcdLeaseAction(selectedSession.id, action, operationId);
+      await reloadRoot(selectedSession.id);
+      if (result.action === "revoke") {
+        await stopActiveWatch();
+        setNativeInfoOpen(false);
+        setNativeInfo(undefined);
+        showDocument(undefined);
+        setSelectedAddress(undefined);
+        setMessage(`Lease ${result.leaseId} 已撤销；关联 key 已过期，脱敏审计已记录`);
+        return;
+      }
+      const refreshed = await runRead(selectedSession.id, action.address);
+      showDocument(refreshed);
+      setSelectedAddress(action.address);
+      if (result.action === "detach") {
+        setNativeInfo(undefined);
+        setMessage(`Lease ${result.previousLeaseId} 已原子解绑；key 已变为永久，脱敏审计已记录`);
+      } else {
+        try {
+          setNativeInfo(await inspectNativeResource(
+            selectedSession.id,
+            action.address,
+            newConnectionId(),
+          ));
+        } catch {
+          setNativeInfo(undefined);
+        }
+        setMessage(result.action === "keepAlive"
+          ? `Lease ${result.leaseId} 已续租一次，剩余 TTL ${result.remainingTtlSeconds} 秒；脱敏审计已记录`
+          : `Lease ${result.leaseId} 已原子绑定；脱敏审计已记录`);
+      }
+    } catch (reason) {
+      const message = errorMessage(reason);
+      try {
+        const refreshed = await runRead(selectedSession.id, action.address);
+        showDocument(refreshed);
+        setSelectedAddress(action.address);
+        if (refreshed.metadata.lease && refreshed.metadata.lease !== "0") {
+          setNativeInfo(await inspectNativeResource(
+            selectedSession.id,
+            action.address,
+            newConnectionId(),
+          ));
+        } else {
+          setNativeInfo(undefined);
+        }
+      } catch (readReason) {
+        if (isNotFound(readReason)) {
+          setNativeInfoOpen(false);
+          setNativeInfo(undefined);
+          showDocument(undefined);
+          setSelectedAddress(undefined);
+        }
+      }
+      if (isOutcomeUnknown(reason)) setNativeInfoOpen(false);
+      setMessage(isOutcomeUnknown(reason)
+        ? `${message}；已尽力刷新 key 与 Lease 状态，请核对后再决定下一步`
+        : message);
+    } finally {
+      finishOperation(operationId);
+      setBusy(false);
+    }
+  };
+
+  const executeZookeeperAction = async (action: ZookeeperNativeAction) => {
+    if (!selectedSession || selectedProfile?.adapter !== "zookeeper" || busy) return;
+    setBusy(true);
+    setMessage(undefined);
+    const operationId = startOperation();
+    try {
+      const result = await executeZookeeperNativeAction(selectedSession.id, action, operationId);
+      await reloadRoot(selectedSession.id);
+      if (result.action === "create") {
+        setPendingZookeeperAction(undefined);
+        setZookeeperConfirmation("");
+        const created = await runRead(selectedSession.id, result.address);
+        showDocument(created);
+        setSelectedAddress(result.address);
+        const path = result.address.type === "zookeeper" ? result.address.path : "新节点";
+        setMessage(`${path} 已原子创建并继承父 ACL；脱敏审计已记录`);
+      } else {
+        setNativeInfo(await inspectNativeResource(
+          selectedSession.id,
+          result.address,
+          newConnectionId(),
+        ));
+        setMessage(`ACL 已从 aversion ${result.previousAclVersion} 原子更新到 ${result.currentAclVersion}；脱敏审计已记录`);
+      }
+    } catch (reason) {
+      const message = errorMessage(reason);
+      try {
+        await reloadRoot(selectedSession.id);
+        if (action.action === "setAcl") {
+          setNativeInfo(await inspectNativeResource(
+            selectedSession.id,
+            action.address,
+            newConnectionId(),
+          ));
+        }
+      } catch {
+        // Best-effort reconciliation must not hide the original mutation error.
+      }
+      if (isOutcomeUnknown(reason)) {
+        setPendingZookeeperAction(undefined);
+        setNativeInfoOpen(false);
+      }
+      setMessage(isOutcomeUnknown(reason)
+        ? `${message}；已刷新资源树，请核对实际路径或 ACL 后再决定下一步`
+        : message);
+    } finally {
+      finishOperation(operationId);
+      setBusy(false);
+    }
+  };
+
+  const openEtcdTransaction = () => {
+    if (!selectedSession || selectedProfile?.adapter !== "etcd" || busy) return;
+    setEtcdTransactionItems([emptyEtcdTransactionItem(), emptyEtcdTransactionItem()]);
+    setEtcdTransactionConfirmation("");
+    setEtcdTransactionOpen(true);
+  };
+
+  const executeTransaction = async () => {
+    if (!selectedSession || selectedProfile?.adapter !== "etcd" || busy) return;
+    let transaction: EtcdTransaction;
+    try {
+      const seen = new Set<string>();
+      const mutations = etcdTransactionItems.map<ResourceMutation>((item) => {
+        const address = etcdAddressFromInput(item.key);
+        if (seen.has(address.keyBase64)) throw new Error("同一个 etcd key 不能在一次事务中出现两次");
+        seen.add(address.keyBase64);
+        if (item.operation === "create") {
+          return {
+            operation: "create",
+            address,
+            value: { content: item.value, encoding: item.encoding },
+          };
+        }
+        const expectedVersion = item.expectedVersion.trim();
+        if (!/^[1-9]\d*$/.test(expectedVersion)) {
+          throw new Error(`“${item.key.trim()}”需要正整数 Mod Revision`);
+        }
+        if (item.operation === "delete") {
+          return { operation: "delete", address, expectedVersion };
+        }
+        return {
+          operation: "update",
+          address,
+          value: { content: item.value, encoding: item.encoding },
+          expectedVersion,
+        };
+      });
+      transaction = { mutations };
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+      return;
+    }
+
+    setBusy(true);
+    setMessage(undefined);
+    const operationId = startOperation();
+    try {
+      const result = await executeEtcdTransaction(selectedSession.id, transaction, operationId);
+      setEtcdTransactionOpen(false);
+      await reloadRoot(selectedSession.id);
+      const selectedResult = document
+        ? result.results.find((item) => sameAddress(item.address, document.address))
+        : undefined;
+      if (selectedResult?.operation === "delete") {
+        await stopActiveWatch();
+        showDocument(undefined);
+        setSelectedAddress(undefined);
+      } else if (selectedResult && document) {
+        showDocument(await runRead(selectedSession.id, document.address));
+      }
+      setMessage(`事务已在 revision ${result.revision} 原子提交 ${result.results.length} 项；脱敏审计已记录`);
+    } catch (reason) {
+      const message = errorMessage(reason);
+      try {
+        await reloadRoot(selectedSession.id);
+        if (document) {
+          try {
+            showDocument(await runRead(selectedSession.id, document.address));
+          } catch (readReason) {
+            if (isNotFound(readReason)) {
+              showDocument(undefined);
+              setSelectedAddress(undefined);
+            }
+          }
+        }
+      } catch {
+        // The original transaction error is the actionable result.
+      }
+      if (isOutcomeUnknown(reason)) setEtcdTransactionOpen(false);
+      setMessage(isOutcomeUnknown(reason)
+        ? `${message}；已尽力刷新远端状态，请核对所有目标 key 后再决定下一步`
+        : message);
+    } finally {
+      finishOperation(operationId);
       setBusy(false);
     }
   };
@@ -1155,8 +1431,11 @@ export function App() {
     setServerHistoryOpen(false);
     setNativeInfoOpen(false);
     setNativeInfo(undefined);
+    setEtcdTransactionOpen(false);
     showDocument(undefined);
     setPendingMutation(undefined);
+    setPendingZookeeperAction(undefined);
+    setNacosNativeOpen(false);
     setCreateDialogOpen(false);
     setMessage("连接已断开");
   };
@@ -1244,6 +1523,7 @@ export function App() {
           <span className="status-dot" />
           {capabilities ? `Rust Core · ${capabilities.length} adapters` : "正在启动 Rust Core…"}
         </div>
+        <button className="button" disabled={busy} onClick={() => void exportDiagnostics()}>诊断包</button>
         <button className="button" onClick={openHistory}>历史</button>
         <button className="button primary" onClick={openNewConnection}>＋ 新建连接</button>
       </header>
@@ -1303,6 +1583,8 @@ export function App() {
           <div className="tree-header">
             <b>{selectedProfile?.name ?? "资源"}</b>
             <button className="icon-button import-resource" disabled={!selectedSession || busy} onClick={() => void chooseImportFile()} title="从 Atlas JSON 导入">⇧</button>
+            {selectedProfile?.adapter === "etcd" && <button className="icon-button transaction-resource" disabled={!selectedSession || busy} onClick={openEtcdTransaction} title="etcd 原子批量事务">T</button>}
+            {selectedProfile?.adapter === "nacos" && <button className="icon-button transaction-resource" disabled={!selectedSession || busy} onClick={() => setNacosNativeOpen(true)} title="Nacos 命名空间、服务与实例管理">N</button>}
             <button className="icon-button create-resource" disabled={!selectedSession || busy} onClick={openCreateResource} title="新建资源">＋</button>
             <button className="icon-button" disabled={!selectedSession || busy} onClick={() => void refreshRoot()} title="刷新">↻</button>
             <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选当前已加载资源…" />
@@ -1377,9 +1659,8 @@ export function App() {
                 <div><span className="eyebrow">RESOURCE</span><h1>{document.name}</h1></div>
                 <div className="actions">
                   {document.address.type === "nacosConfig" && <button className="button" disabled={busy} onClick={openServerHistory}>服务端历史</button>}
-                  {document.address.type === "etcd"
-                    && Boolean(document.metadata.lease && document.metadata.lease !== "0")
-                    && <button className="button" disabled={busy} onClick={() => void openNativeInfo()}>Lease</button>}
+                  {document.address.type === "nacosConfig" && <button className="button" disabled={busy} onClick={() => setNacosNativeOpen(true)}>服务管理</button>}
+                  {document.address.type === "etcd" && <button className="button" disabled={busy} onClick={() => void openNativeInfo()}>Lease</button>}
                   {document.address.type === "zookeeper" && <button className="button" disabled={busy} onClick={() => void openNativeInfo()}>ACL</button>}
                   <button className="button" disabled={busy} onClick={openExportDialog}>导出</button>
                   <button className="button danger" disabled={busy || !document.version} onClick={prepareDelete}>删除</button>
@@ -1478,6 +1759,33 @@ export function App() {
         />
       )}
 
+      {pendingZookeeperAction && selectedProfile?.adapter === "zookeeper" && (
+        <ZookeeperCreateConfirmationDialog
+          profile={selectedProfile}
+          action={pendingZookeeperAction}
+          confirmation={zookeeperConfirmation}
+          busy={busy}
+          onConfirmationChange={setZookeeperConfirmation}
+          onConfirm={() => void executeZookeeperAction(pendingZookeeperAction)}
+          onCancelOperation={() => void cancelActiveOperation()}
+          onClose={() => setPendingZookeeperAction(undefined)}
+        />
+      )}
+
+      {etcdTransactionOpen && selectedProfile?.adapter === "etcd" && (
+        <EtcdTransactionDialog
+          profile={selectedProfile}
+          items={etcdTransactionItems}
+          confirmationText={etcdTransactionConfirmation}
+          busy={busy}
+          onItemsChange={setEtcdTransactionItems}
+          onConfirmationTextChange={setEtcdTransactionConfirmation}
+          onCancel={() => setEtcdTransactionOpen(false)}
+          onExecute={() => void executeTransaction()}
+          onCancelOperation={() => void cancelActiveOperation()}
+        />
+      )}
+
       {exportDialogOpen && document && (
         <ExportDialog
           document={document}
@@ -1530,11 +1838,42 @@ export function App() {
         />
       )}
 
-      {nativeInfoOpen && selectedProfile && selectedProfile.adapter !== "nacos" && (
-        <NativeInfoDialog
-          adapter={selectedProfile.adapter}
-          info={nativeInfo}
+      {nacosNativeOpen && selectedProfile?.adapter === "nacos" && selectedSession && (
+        <NacosNativeDialog
+          profile={selectedProfile}
+          connectionId={selectedSession.id}
+          onMessage={setMessage}
+          onClose={() => setNacosNativeOpen(false)}
+        />
+      )}
+
+      {nativeInfoOpen
+        && selectedProfile?.adapter === "etcd"
+        && document?.address.type === "etcd"
+        && (
+        <EtcdLeaseDialog
+          profile={selectedProfile}
+          document={document}
+          info={nativeInfo?.kind === "etcdLease" ? nativeInfo : undefined}
           loading={nativeInfoLoading}
+          busy={busy}
+          onExecute={(action) => void executeLeaseAction(action)}
+          onCancelOperation={() => void cancelActiveOperation()}
+          onClose={() => {
+            setNativeInfoOpen(false);
+            setNativeInfo(undefined);
+          }}
+        />
+      )}
+
+      {nativeInfoOpen && selectedProfile?.adapter === "zookeeper" && (
+        document?.address.type === "zookeeper" && <ZookeeperAclDialog
+          profile={selectedProfile}
+          document={document}
+          info={nativeInfo?.kind === "zookeeperAcl" ? nativeInfo : undefined}
+          loading={nativeInfoLoading}
+          busy={busy}
+          onExecute={(action) => void executeZookeeperAction(action)}
           onCancelOperation={() => void cancelActiveOperation()}
           onClose={() => {
             setNativeInfoOpen(false);

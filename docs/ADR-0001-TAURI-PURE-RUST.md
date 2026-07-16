@@ -2,6 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-07-14
+- 最近更新：2026-07-16
 
 ## 背景
 
@@ -11,22 +12,33 @@ Atlas Registry 需要以桌面应用形式统一访问 etcd、ZooKeeper 和 Naco
 
 采用 React/TypeScript WebView + Tauri 2 + Rust 核心：
 
-- etcd：`etcd-client` 0.19，启用系统 TLS roots。
-- ZooKeeper：`zookeeper-client` 0.11.1，启用 Tokio 与 TLS。
-- Nacos：`nacos-sdk` 0.8；Config 客户端负责连接与单配置读取，2.x legacy 管理接口和 3.x Admin API 负责配置分页列表；Naming 能力在后续垂直切片接入。
-- `RegistryCatalog` 声明 adapter descriptor 与能力；`RegistryService` 持有会话，并执行可取消的连接探测、浏览、有界标识搜索、读取和条件变更操作。
-- 公共能力可以统一；lease、transaction、ACL、ephemeral、namespace、service 等原生能力不能抹平。
+- etcd 使用 `etcd-client` 0.19，并启用系统 TLS roots。
+- ZooKeeper 使用 `zookeeper-client` 0.11.1，并启用 Tokio 与 TLS。
+- Nacos 使用 `nacos-sdk` 0.8。Config/Naming 客户端分别承担配置 mutation/listener 与临时实例 session；配置正文、写前检查、写后确认和范围管理由 2.x legacy 管理接口或 3.x Admin API 权威读取。
+- `RegistryCatalog` 声明 adapter descriptor 与能力；`RegistryService` 持有长生命周期会话，并执行可取消的连接、浏览、有界标识搜索、读取、监听和条件变更。
+- 公共能力只统一连接与资源操作外形；lease、transaction、ACL、ephemeral、namespace、service 等原生语义不被抹平。
 
 ## 结果
 
 - 删除 Go sidecar、进程监督、JSON-RPC framing 和外部二进制签名复杂度。
-- Rust 二进制直接持有客户端连接，后续必须在 Tauri managed state 中实现长生命周期 session pool。
-- 三个 Rust 客户端均不是 etcd/Apache ZooKeeper 官方 binding；兼容性责任由项目承担。
-- `etcd-client` 构建依赖 `protoc`，开发和 CI 环境必须显式安装。
-- 首发前必须验证 mTLS、ZooKeeper ACL/TLS/SASL、watch 重连、Nacos 2.x/3.x 分版管理 API。
+- Rust 二进制直接持有客户端连接与临时资源 session，Tauri managed state 成为生命周期边界。
+- 三个 Rust 客户端均不是 etcd/Apache ZooKeeper 官方 binding；兼容性责任由项目的真实服务矩阵承担。
+- `etcd-client` 构建依赖 `protoc`，开发与 CI 环境必须显式安装。
+- ZooKeeper SASL 保持为未启用的扩展点；公开发布仍需要组织签名、公证和各平台安装证据。
 
-## 当前进展
+## 当前实现
 
-技术 Spike 已结束。正式开发已实现长生命周期 session、可取消的按需浏览、资源读取、1 MiB WebView 大值边界，以及创建、条件更新/删除、冲突反馈、所有写入的连接名二次确认和本地脱敏审计。etcd 与 ZooKeeper 使用服务端原子条件；通用 ZooKeeper create 仅创建继承父 ACL 的持久节点，ephemeral/sequential 留给原生能力入口；Nacos 更新使用 MD5 CAS，创建和删除明确标记为检查后变更。连接配置已支持版本迁移，密码与 token 进入系统凭据库；etcd 用户名密码与 mTLS、ZooKeeper digest 与 TLS、Nacos 用户名密码和自定义鉴权上下文已接入原生会话。实时链路已接入 etcd revision watch、ZooKeeper one-shot watch 自动重新布防和 Nacos SDK listener；订阅具备显式取消、连接关闭联动清理、后端 64 槽有界事件通道，以及 reconnecting、compacted、session expired 等 UI 状态，事件边界不包含资源值。Nacos 通过管理 API 心跳把 SDK 内部重连状态显式映射到 UI。标识搜索不读取 value：etcd 使用固定扫描窗口和游标，ZooKeeper 仅搜索当前层 children，Nacos 使用服务端 dataId 模糊分页；精确地址由读取接口直接定位。导出默认 metadata-only，包含 value 必须显式选择；导入文件受 8 MiB/50 条限制并验证摘要，value 只保存在 Rust 的 10 分钟一次性计划中，WebView 仅接收 create/update/skip 脱敏预览，实际写入复用条件变更和审计链路。本地审计历史以严格 DTO 倒序分页，每页最多扫描 512 KiB，不把原始 JSONL 交给前端；Nacos 2.x legacy 与 3.x Admin API 的配置历史列表默认只返回元数据，历史 value 仅在用户选择具体 revision 后读取，暂不提供无条件恢复。首批只读原生入口已经接入：etcd key 可查看 Lease ID、剩余 TTL 和授予 TTL；为兼容 etcd 3.7 不返回 Lease 字段的 keys-only 优化，检查会对 exact key 复用 1 MiB 边界读取并立即丢弃 value，但不会展开 Lease 关联 key。ZooKeeper znode 可查看 ACL 版本与最多 256 条身份/权限规则。两者均使用可取消 command，UI 不提供原生写入。Nacos 鉴权隔离为独立策略模块，ZooKeeper SASL 仍沿用客户端 `Connector` 作为后续扩展入口，尚未启用具体机制。公共 catalog 声明 `probe`、`browse`、`search`、`read`、`watch`、`create`、`update` 和 `delete`，etcd 额外声明 `lease`、ZooKeeper 额外声明 `acl`、Nacos 额外声明 `history`。etcd 3.6/3.7、ZooKeeper 3.8/3.9、Nacos 2.5/3.2 六项真实服务矩阵均已通过；三平台 quality workflow、显式 command capability、严格 CSP、固定 action SHA 和四平台 Draft Release 已接入。ZooKeeper SASL、Windows/Linux 组织签名以及其余生产能力仍待后续切片执行。
+正式客户端已完成三协议长生命周期 session、分页/懒加载浏览、条件写入、脱敏审计、监听、搜索、导入导出、历史和协议原生操作：
 
-Nacos SDK 0.8 的 `remove_listener` 会移除应用回调，但上游实现暂不会在最后一个回调移除后清除其 session 级 cache/listen；该 SDK cache 还会写入用户目录。为避免已删除配置从残留 cache 返回给 UI，配置读取、写前检查和写后确认均使用对应版本的权威 HTTP API，SDK 只承担 gRPC mutation 与 listener。应用事件通道不会接收配置值，但在发布加固阶段仍必须通过升级、上游补丁或替换 listener 实现来收紧 SDK 的内存、磁盘与后台监听生命周期。
+- etcd 覆盖 Lease 创建绑定、绑定已有、单次续租、解绑、撤销，以及 2–32 项、总载荷 1 MiB 的原子 transaction。
+- ZooKeeper 覆盖 ACL aversion 条件写与 persistent、persistent sequential、ephemeral、ephemeral sequential 四种节点模式。
+- Nacos 覆盖 2.x/3.x namespace/service、persistent instance，以及由 Naming SDK session 持有并维持心跳的 ephemeral instance 注册、更新和注销。
+- Nacos 配置 listener 每 5 秒使用权威 HTTP MD5 对账，避免把 SDK cache 当作当前状态。
+- 管理写入确认页展示环境、endpoint、namespace、操作和影响范围；原生审计记录真实前后状态的大小、编码、版本与 SHA-256，而不保存正文。
+- 诊断包仅包含运行时、adapter capability 和连接聚合计数，不含连接标识、endpoint、namespace、资源内容或凭据。
+
+etcd 3.6/3.7、ZooKeeper 3.8/3.9、Nacos 2.5/3.2 六项真实服务矩阵已通过。macOS 安装版与 DMG 已完成本机签名结构、复制安装和视觉 smoke。Windows/Linux 构建与安装检查已进入 quality workflow，但必须等远端 job 实际变绿后才构成平台证据。
+
+## 已知上游约束
+
+`nacos-sdk` 0.8 的 `remove_listener` 尚不会在最后一个回调移除后清除 session 级 cache/listen，且 SDK cache 会写入用户目录。应用因此不从该 cache 读取当前配置：正文读取、写前检查、写后确认和周期对账均走对应版本的权威 HTTP API；SDK 只承担 gRPC mutation、listener 与 Naming 临时实例 session。后续升级或替换 SDK 时应继续收紧其内存、磁盘和后台监听生命周期。

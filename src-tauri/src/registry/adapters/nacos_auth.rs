@@ -49,19 +49,25 @@ pub(super) enum TokenTransport {
     Bearer,
 }
 
+pub(super) struct NacosAuthConfiguration {
+    pub(super) config_builder: ConfigServiceBuilder,
+    pub(super) request_auth: NacosRequestAuth,
+    pub(super) sdk_auth: Option<Arc<dyn AuthPlugin>>,
+}
+
 pub(super) fn configure(
     mut builder: ConfigServiceBuilder,
     http: reqwest::Client,
     profile: &ConnectionProfile,
     secret: Option<&Arc<ConnectionSecret>>,
-) -> Result<(ConfigServiceBuilder, NacosRequestAuth), RegistryError> {
-    let request_auth = match profile.auth.mode {
-        AuthenticationMode::None => NacosRequestAuth::None,
+) -> Result<NacosAuthConfiguration, RegistryError> {
+    let (request_auth, sdk_auth) = match profile.auth.mode {
+        AuthenticationMode::None => (NacosRequestAuth::None, None),
         AuthenticationMode::UsernamePassword => {
             let secret = required_secret(profile, secret)?;
             let token = Arc::new(RwLock::new(None));
             let (login_path, form_encoded, transport) = login_settings(profile.nacos_api_version);
-            builder = builder.with_auth_plugin(Arc::new(NacosHttpAuthPlugin {
+            let plugin: Arc<dyn AuthPlugin> = Arc::new(NacosHttpAuthPlugin {
                 http,
                 login_base: nacos_server_base(first_endpoint(&profile.endpoint)),
                 login_path,
@@ -69,19 +75,24 @@ pub(super) fn configure(
                 username: profile.auth.username.clone(),
                 password: Arc::downgrade(secret),
                 token: Arc::downgrade(&token),
-            }));
-            NacosRequestAuth::Token { token, transport }
+            });
+            builder = builder.with_auth_plugin(plugin.clone());
+            (NacosRequestAuth::Token { token, transport }, Some(plugin))
         }
         AuthenticationMode::Custom => {
             let secret = required_secret(profile, secret)?.clone();
-            builder = builder.with_auth_plugin(Arc::new(NacosStaticAuthPlugin {
+            let plugin: Arc<dyn AuthPlugin> = Arc::new(NacosStaticAuthPlugin {
                 key: profile.auth.custom_key.clone(),
                 secret: Arc::downgrade(&secret),
-            }));
-            NacosRequestAuth::Static {
-                key: profile.auth.custom_key.clone(),
-                secret,
-            }
+            });
+            builder = builder.with_auth_plugin(plugin.clone());
+            (
+                NacosRequestAuth::Static {
+                    key: profile.auth.custom_key.clone(),
+                    secret,
+                },
+                Some(plugin),
+            )
         }
         AuthenticationMode::Digest => {
             return Err(RegistryError::validation(
@@ -89,7 +100,11 @@ pub(super) fn configure(
             ));
         }
     };
-    Ok((builder, request_auth))
+    Ok(NacosAuthConfiguration {
+        config_builder: builder,
+        request_auth,
+        sdk_auth,
+    })
 }
 
 struct NacosHttpAuthPlugin {

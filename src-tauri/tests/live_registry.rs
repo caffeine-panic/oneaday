@@ -1,10 +1,12 @@
 use atlas_registry_lib::{
     credentials::ConnectionSecret,
     registry::{
-        AdapterId, AuthenticationMode, ConnectionAuth, ConnectionProfile, MutationValue,
-        NacosApiVersion, NativeResourceInfo, OperationId, RegistryService, ResourceAddress,
+        AdapterId, AuthenticationMode, ConnectionAuth, ConnectionProfile, EtcdLeaseAction,
+        EtcdLeaseActionResult, EtcdTransaction, MutationValue, NacosApiVersion, NacosNativeAction,
+        NacosNativeOperation, NativeResourceInfo, OperationId, RegistryService, ResourceAddress,
         ResourceHistoryRequest, ResourceMutation, ResourceSearchRequest, SubscriptionId,
-        TlsProfile, ValueEncoding, WatchEvent, WatchRequest, WatchStatusState,
+        TlsProfile, ValueEncoding, WatchEvent, WatchRequest, WatchStatusState, ZookeeperCreateMode,
+        ZookeeperNativeAction, ZookeeperNativeActionResult,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -149,6 +151,8 @@ fn etcd_live_session_can_browse_the_root() {
                 key_base64: STANDARD.encode(format!("{prefix}/{}", unique_suffix())),
             };
             assert_create_update_delete(&service, &session.id, address).await;
+            assert_etcd_transaction(&service, &session.id, &prefix).await;
+            assert_etcd_lease_lifecycle(&service, &session.id, &prefix).await;
         }
     });
 }
@@ -214,8 +218,154 @@ fn zookeeper_live_session_can_browse_the_root() {
                 ),
             };
             assert_create_update_delete(&service, &session.id, address).await;
+            assert_zookeeper_native_actions(&service, &session.id, &parent).await;
         }
     });
+}
+
+async fn assert_zookeeper_native_actions(
+    service: &RegistryService,
+    connection_id: &str,
+    parent: &str,
+) {
+    let prefix = format!(
+        "{}/atlas-native-{}",
+        parent.trim_end_matches('/'),
+        unique_suffix()
+    );
+    let acl_address = ResourceAddress::Zookeeper {
+        path: format!("{prefix}-acl"),
+    };
+    service
+        .mutate(
+            connection_id,
+            ResourceMutation::Create {
+                address: acl_address.clone(),
+                value: text_value("acl-native"),
+                content_type: None,
+            },
+        )
+        .await
+        .expect("ACL fixture should be created");
+    let (acl_version, entries) = match service
+        .inspect_native_cancellable(
+            OperationId::new(format!("native-acl-{}", unique_suffix())).unwrap(),
+            connection_id.to_owned(),
+            acl_address.clone(),
+        )
+        .await
+        .expect("ACL fixture should be inspectable")
+    {
+        NativeResourceInfo::ZookeeperAcl {
+            acl_version,
+            entries,
+            ..
+        } => (acl_version, entries),
+        other => panic!("unexpected ZooKeeper native info: {other:?}"),
+    };
+    let updated = service
+        .execute_zookeeper_native_action(
+            connection_id,
+            ZookeeperNativeAction::SetAcl {
+                address: acl_address.clone(),
+                expected_acl_version: acl_version,
+                entries: entries.clone(),
+            },
+        )
+        .await
+        .expect("matching aversion should atomically apply the ACL");
+    let current_acl_version = match updated {
+        ZookeeperNativeActionResult::SetAcl {
+            previous_acl_version,
+            current_acl_version,
+            current_entries,
+            ..
+        } => {
+            assert_eq!(previous_acl_version, acl_version);
+            assert_eq!(current_entries, entries);
+            assert_eq!(current_acl_version, acl_version + 1);
+            current_acl_version
+        }
+        other => panic!("unexpected ACL action result: {other:?}"),
+    };
+    let stale = service
+        .execute_zookeeper_native_action(
+            connection_id,
+            ZookeeperNativeAction::SetAcl {
+                address: acl_address.clone(),
+                expected_acl_version: acl_version,
+                entries,
+            },
+        )
+        .await
+        .expect_err("stale aversion must be rejected");
+    assert_eq!(
+        stale.code,
+        atlas_registry_lib::registry::RegistryErrorCode::Conflict
+    );
+
+    let created = service
+        .execute_zookeeper_native_action(
+            connection_id,
+            ZookeeperNativeAction::Create {
+                address: ResourceAddress::Zookeeper {
+                    path: format!("{prefix}-member-"),
+                },
+                value: text_value("online"),
+                mode: ZookeeperCreateMode::EphemeralSequential,
+            },
+        )
+        .await
+        .expect("ephemeral sequential node should inherit its parent ACL");
+    let created_address = match created {
+        ZookeeperNativeActionResult::Create {
+            requested_address,
+            address,
+            sequence,
+            mode,
+            ..
+        } => {
+            assert_eq!(mode, ZookeeperCreateMode::EphemeralSequential);
+            assert!(sequence.as_deref().is_some_and(|value| value.len() >= 10));
+            assert_ne!(address, requested_address);
+            address
+        }
+        other => panic!("unexpected native create result: {other:?}"),
+    };
+    let ephemeral = service
+        .read(connection_id, created_address.clone())
+        .await
+        .expect("ephemeral sequential node should remain while the session is open");
+    assert_ne!(
+        ephemeral.metadata.get("ephemeralOwner").map(String::as_str),
+        Some("0")
+    );
+
+    service
+        .mutate(
+            connection_id,
+            ResourceMutation::Delete {
+                address: created_address,
+                expected_version: ephemeral.version.unwrap(),
+            },
+        )
+        .await
+        .expect("ephemeral fixture should be removable explicitly");
+    let acl_document = service
+        .read(connection_id, acl_address.clone())
+        .await
+        .expect("ACL fixture should remain readable after ACL update");
+    assert_eq!(current_acl_version, acl_version + 1);
+    service
+        .mutate(
+            connection_id,
+            ResourceMutation::Delete {
+                address: acl_address,
+                expected_version: acl_document.version.unwrap(),
+            },
+        )
+        .await
+        .expect("ACL fixture should be cleaned up");
 }
 
 #[test]
@@ -294,12 +444,512 @@ fn nacos_live_session_can_browse_the_config_list() {
             let group = std::env::var("ATLAS_TEST_NACOS_MUTATION_GROUP")
                 .unwrap_or_else(|_| "ATLAS_REGISTRY_TEST".to_owned());
             let address = ResourceAddress::NacosConfig {
-                group,
+                group: group.clone(),
                 data_id: format!("atlas-registry-live-test-{}", unique_suffix()),
             };
             assert_create_update_delete(&service, &session.id, address).await;
+            assert_nacos_native_actions(&service, &session.id, &group).await;
         }
     });
+}
+
+async fn assert_nacos_native_actions(service: &RegistryService, connection_id: &str, group: &str) {
+    let suffix = unique_suffix();
+    let namespace_id = format!("atlas-{suffix}");
+    let created_namespace = service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::CreateNamespace {
+                namespace_id: namespace_id.clone(),
+                name: format!("Atlas {suffix}"),
+                description: "Atlas compatibility fixture".to_owned(),
+            },
+        )
+        .await
+        .expect("Nacos namespace should be creatable through the selected API generation");
+    assert_eq!(
+        created_namespace.operation,
+        NacosNativeOperation::CreateNamespace
+    );
+    let namespace = service
+        .list_nacos_namespaces(connection_id)
+        .await
+        .expect("Nacos namespaces should be listable")
+        .into_iter()
+        .find(|item| item.id == namespace_id)
+        .expect("created namespace should be visible");
+
+    let service_name = format!("atlas-native-{suffix}");
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::CreateService {
+                group: group.to_owned(),
+                service_name: service_name.clone(),
+                protect_threshold: 0.0,
+                ephemeral: false,
+                metadata: std::collections::BTreeMap::from([(
+                    "owner".to_owned(),
+                    "atlas".to_owned(),
+                )]),
+            },
+        )
+        .await
+        .expect("Nacos persistent service should be creatable");
+    let created_service = service
+        .read_nacos_service(connection_id, group.to_owned(), service_name.clone())
+        .await
+        .expect("created Nacos service should be readable");
+
+    let port = 10_000 + (std::process::id() % 50_000) as u16;
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::RegisterInstance {
+                group: group.to_owned(),
+                service_name: service_name.clone(),
+                cluster: "DEFAULT".to_owned(),
+                ip: "127.0.0.1".to_owned(),
+                port,
+                weight: 1.0,
+                enabled: true,
+                ephemeral: false,
+                metadata: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("Nacos persistent instance should be registerable");
+    let instance = service
+        .list_nacos_instances(connection_id, group.to_owned(), service_name.clone())
+        .await
+        .expect("Nacos instances should be listable")
+        .into_iter()
+        .find(|item| item.ip == "127.0.0.1" && item.port == port)
+        .expect("registered Nacos instance should be visible");
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::UpdateInstance {
+                group: group.to_owned(),
+                service_name: service_name.clone(),
+                cluster: instance.cluster.clone(),
+                ip: instance.ip.clone(),
+                port: instance.port,
+                weight: 2.0,
+                enabled: true,
+                ephemeral: false,
+                metadata: std::collections::BTreeMap::from([(
+                    "zone".to_owned(),
+                    "test".to_owned(),
+                )]),
+                expected_fingerprint: instance.fingerprint,
+            },
+        )
+        .await
+        .expect("Nacos instance should update after a matching fingerprint preflight");
+    let updated_instance = service
+        .list_nacos_instances(connection_id, group.to_owned(), service_name.clone())
+        .await
+        .expect("updated Nacos instance should be listable")
+        .into_iter()
+        .find(|item| item.ip == "127.0.0.1" && item.port == port)
+        .expect("updated Nacos instance should remain visible");
+    assert_eq!(updated_instance.weight, 2.0);
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::DeregisterInstance {
+                group: group.to_owned(),
+                service_name: service_name.clone(),
+                cluster: updated_instance.cluster,
+                ip: updated_instance.ip,
+                port: updated_instance.port,
+                ephemeral: updated_instance.ephemeral,
+                expected_fingerprint: updated_instance.fingerprint,
+            },
+        )
+        .await
+        .expect("Nacos instance should deregister after a matching fingerprint preflight");
+
+    let ephemeral_service_name = format!("{service_name}-ephemeral");
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::CreateService {
+                group: group.to_owned(),
+                service_name: ephemeral_service_name.clone(),
+                protect_threshold: 0.0,
+                ephemeral: true,
+                metadata: std::collections::BTreeMap::from([(
+                    "lifecycle".to_owned(),
+                    "sdk-heartbeat".to_owned(),
+                )]),
+            },
+        )
+        .await
+        .expect("Nacos ephemeral service should be creatable");
+    let ephemeral_port = port + 1;
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::RegisterInstance {
+                group: group.to_owned(),
+                service_name: ephemeral_service_name.clone(),
+                cluster: "DEFAULT".to_owned(),
+                ip: "127.0.0.1".to_owned(),
+                port: ephemeral_port,
+                weight: 1.0,
+                enabled: true,
+                ephemeral: true,
+                metadata: std::collections::BTreeMap::from([(
+                    "lifecycle".to_owned(),
+                    "sdk-heartbeat".to_owned(),
+                )]),
+            },
+        )
+        .await
+        .expect("Nacos ephemeral instance should be registered by the Naming SDK");
+    let ephemeral_instance = service
+        .list_nacos_instances(
+            connection_id,
+            group.to_owned(),
+            ephemeral_service_name.clone(),
+        )
+        .await
+        .expect("Nacos ephemeral instance should be listable")
+        .into_iter()
+        .find(|item| item.ip == "127.0.0.1" && item.port == ephemeral_port)
+        .expect("SDK-managed Nacos instance should be visible");
+    assert!(ephemeral_instance.ephemeral);
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::UpdateInstance {
+                group: group.to_owned(),
+                service_name: ephemeral_service_name.clone(),
+                cluster: ephemeral_instance.cluster.clone(),
+                ip: ephemeral_instance.ip.clone(),
+                port: ephemeral_instance.port,
+                weight: 1.5,
+                enabled: true,
+                ephemeral: true,
+                metadata: std::collections::BTreeMap::from([(
+                    "lifecycle".to_owned(),
+                    "sdk-heartbeat-updated".to_owned(),
+                )]),
+                expected_fingerprint: ephemeral_instance.fingerprint,
+            },
+        )
+        .await
+        .expect("Nacos ephemeral instance should update through the Naming SDK");
+    let updated_ephemeral = service
+        .list_nacos_instances(
+            connection_id,
+            group.to_owned(),
+            ephemeral_service_name.clone(),
+        )
+        .await
+        .expect("updated Nacos ephemeral instance should be listable")
+        .into_iter()
+        .find(|item| item.ip == "127.0.0.1" && item.port == ephemeral_port)
+        .expect("updated SDK-managed Nacos instance should remain visible");
+    assert_eq!(updated_ephemeral.weight, 1.5);
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::DeregisterInstance {
+                group: group.to_owned(),
+                service_name: ephemeral_service_name.clone(),
+                cluster: updated_ephemeral.cluster,
+                ip: updated_ephemeral.ip,
+                port: updated_ephemeral.port,
+                ephemeral: true,
+                expected_fingerprint: updated_ephemeral.fingerprint,
+            },
+        )
+        .await
+        .expect("Nacos ephemeral instance should deregister through the Naming SDK");
+    let ephemeral_service = service
+        .read_nacos_service(
+            connection_id,
+            group.to_owned(),
+            ephemeral_service_name.clone(),
+        )
+        .await
+        .expect("empty Nacos ephemeral service should remain before deletion");
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::DeleteService {
+                group: group.to_owned(),
+                service_name: ephemeral_service_name,
+                expected_fingerprint: ephemeral_service.fingerprint,
+            },
+        )
+        .await
+        .expect("empty Nacos ephemeral service should be deletable");
+    let service_before_delete = service
+        .read_nacos_service(connection_id, group.to_owned(), service_name.clone())
+        .await
+        .expect("empty Nacos service should remain before deletion");
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::DeleteService {
+                group: group.to_owned(),
+                service_name,
+                expected_fingerprint: service_before_delete.fingerprint,
+            },
+        )
+        .await
+        .expect("empty Nacos service should be deletable");
+    service
+        .execute_nacos_native_action(
+            connection_id,
+            NacosNativeAction::DeleteNamespace {
+                namespace_id,
+                expected_fingerprint: namespace.fingerprint,
+            },
+        )
+        .await
+        .expect("empty Nacos namespace should be deletable");
+    assert_eq!(created_service.name, format!("atlas-native-{suffix}"));
+}
+
+async fn assert_etcd_lease_lifecycle(service: &RegistryService, connection_id: &str, prefix: &str) {
+    let address = ResourceAddress::Etcd {
+        key_base64: STANDARD.encode(format!("{prefix}/lease-{}", unique_suffix())),
+    };
+    let created = service
+        .mutate(
+            connection_id,
+            ResourceMutation::Create {
+                address: address.clone(),
+                value: text_value("lease-lifecycle"),
+                content_type: None,
+            },
+        )
+        .await
+        .expect("lease fixture should be created");
+    let created_version = created.current.unwrap().version.unwrap();
+
+    let attached = service
+        .execute_etcd_lease_action(
+            connection_id,
+            EtcdLeaseAction::GrantAndAttach {
+                address: address.clone(),
+                expected_version: created_version,
+                ttl_seconds: 120,
+            },
+        )
+        .await
+        .expect("a new lease should be granted and attached");
+    let (lease_id, attached_version) = match attached {
+        EtcdLeaseActionResult::GrantAndAttach {
+            lease_id,
+            current,
+            remaining_ttl_seconds,
+            ..
+        } => {
+            assert!(remaining_ttl_seconds > 0);
+            (lease_id, current.version.unwrap())
+        }
+        other => panic!("unexpected grant result: {other:?}"),
+    };
+    service
+        .execute_etcd_lease_action(
+            connection_id,
+            EtcdLeaseAction::KeepAlive {
+                address: address.clone(),
+                lease_id: lease_id.clone(),
+            },
+        )
+        .await
+        .expect("the selected lease should accept a one-shot keep alive");
+
+    let detached = service
+        .execute_etcd_lease_action(
+            connection_id,
+            EtcdLeaseAction::Detach {
+                address: address.clone(),
+                expected_version: attached_version,
+            },
+        )
+        .await
+        .expect("lease should detach with a matching revision");
+    let detached_version = match detached {
+        EtcdLeaseActionResult::Detach { current, .. } => current.version.unwrap(),
+        other => panic!("unexpected detach result: {other:?}"),
+    };
+
+    let reattached = service
+        .execute_etcd_lease_action(
+            connection_id,
+            EtcdLeaseAction::Attach {
+                address: address.clone(),
+                expected_version: detached_version,
+                lease_id: lease_id.clone(),
+            },
+        )
+        .await
+        .expect("the existing lease should reattach");
+    let reattached_version = match reattached {
+        EtcdLeaseActionResult::Attach { current, .. } => current.version.unwrap(),
+        other => panic!("unexpected attach result: {other:?}"),
+    };
+
+    service
+        .execute_etcd_lease_action(
+            connection_id,
+            EtcdLeaseAction::Revoke {
+                address: address.clone(),
+                expected_version: reattached_version,
+                lease_id,
+            },
+        )
+        .await
+        .expect("revoke should expire the selected key and lease");
+    assert_eq!(
+        service.read(connection_id, address).await.unwrap_err().code,
+        atlas_registry_lib::registry::RegistryErrorCode::NotFound
+    );
+}
+
+async fn assert_etcd_transaction(service: &RegistryService, connection_id: &str, prefix: &str) {
+    let suffix = unique_suffix();
+    let first = ResourceAddress::Etcd {
+        key_base64: STANDARD.encode(format!("{prefix}/{suffix}-first")),
+    };
+    let second = ResourceAddress::Etcd {
+        key_base64: STANDARD.encode(format!("{prefix}/{suffix}-second")),
+    };
+    let created = service
+        .execute_etcd_transaction(
+            connection_id,
+            EtcdTransaction {
+                mutations: vec![
+                    ResourceMutation::Create {
+                        address: first.clone(),
+                        value: text_value("transaction-first"),
+                        content_type: None,
+                    },
+                    ResourceMutation::Create {
+                        address: second.clone(),
+                        value: text_value("transaction-second"),
+                        content_type: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("etcd transaction should create both keys atomically");
+    assert_eq!(created.results.len(), 2);
+    assert!(created.results.iter().all(|result| {
+        result
+            .current
+            .as_ref()
+            .and_then(|item| item.version.as_deref())
+            == Some(created.revision.as_str())
+    }));
+
+    let first_version = created.results[0]
+        .current
+        .as_ref()
+        .and_then(|snapshot| snapshot.version.clone())
+        .expect("transaction create should expose the shared revision");
+    let second_version = created.results[1]
+        .current
+        .as_ref()
+        .and_then(|snapshot| snapshot.version.clone())
+        .expect("transaction create should expose the shared revision");
+    let conflict = service
+        .execute_etcd_transaction(
+            connection_id,
+            EtcdTransaction {
+                mutations: vec![
+                    ResourceMutation::Update {
+                        address: first.clone(),
+                        value: text_value("must-not-apply"),
+                        content_type: None,
+                        expected_version: (first_version.parse::<i64>().unwrap() + 1).to_string(),
+                    },
+                    ResourceMutation::Delete {
+                        address: second.clone(),
+                        expected_version: second_version.clone(),
+                    },
+                ],
+            },
+        )
+        .await
+        .expect_err("one stale compare must reject the entire transaction");
+    assert_eq!(
+        conflict.code,
+        atlas_registry_lib::registry::RegistryErrorCode::Conflict
+    );
+    assert_eq!(
+        service
+            .read(connection_id, first.clone())
+            .await
+            .unwrap()
+            .value
+            .content,
+        "transaction-first"
+    );
+    service
+        .read(connection_id, second.clone())
+        .await
+        .expect("failed transaction must not delete the second key");
+
+    let applied = service
+        .execute_etcd_transaction(
+            connection_id,
+            EtcdTransaction {
+                mutations: vec![
+                    ResourceMutation::Update {
+                        address: first.clone(),
+                        value: text_value("transaction-updated"),
+                        content_type: None,
+                        expected_version: first_version,
+                    },
+                    ResourceMutation::Delete {
+                        address: second.clone(),
+                        expected_version: second_version,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("matching compares should apply the entire transaction");
+    assert_eq!(applied.results.len(), 2);
+    assert_eq!(
+        service
+            .read(connection_id, first.clone())
+            .await
+            .unwrap()
+            .value
+            .content,
+        "transaction-updated"
+    );
+    assert_eq!(
+        service.read(connection_id, second).await.unwrap_err().code,
+        atlas_registry_lib::registry::RegistryErrorCode::NotFound
+    );
+
+    let updated_version = applied.results[0]
+        .current
+        .as_ref()
+        .and_then(|snapshot| snapshot.version.clone())
+        .unwrap();
+    service
+        .mutate(
+            connection_id,
+            ResourceMutation::Delete {
+                address: first,
+                expected_version: updated_version,
+            },
+        )
+        .await
+        .expect("transaction test should clean up the remaining key");
 }
 
 async fn assert_create_update_delete(
