@@ -30,6 +30,8 @@ fn main() {
         "cancel_operation",
         "start_watch",
         "stop_watch",
+        "check_for_app_update",
+        "install_app_update",
     ];
 
     tauri_build::try_build(

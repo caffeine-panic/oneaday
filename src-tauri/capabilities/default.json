@@ -33,6 +33,8 @@
     "allow-load-audit-history",
     "allow-cancel-operation",
     "allow-start-watch",
-    "allow-stop-watch"
+    "allow-stop-watch",
+    "allow-check-for-app-update",
+    "allow-install-app-update"
   ]
 }

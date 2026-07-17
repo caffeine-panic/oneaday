@@ -77,15 +77,15 @@ jobs:
 
       - name: Build Linux install bundles
         if: runner.os == 'Linux'
-        run: npm run tauri build -- --bundles deb,appimage
+        run: npm run tauri build -- --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Build Windows install bundles
         if: runner.os == 'Windows'
-        run: npm run tauri build -- --bundles msi,nsis
+        run: npm run tauri build -- --bundles msi,nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Build macOS install bundles
         if: runner.os == 'macOS'
-        run: npm run tauri build -- --bundles app,dmg
+        run: npm run tauri build -- --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Verify and install Linux bundles
         if: runner.os == 'Linux'

@@ -89,6 +89,18 @@ export type DiagnosticExportReceipt = {
   connectionCount: number;
 };
 
+export type AppUpdateInfo = {
+  version: string;
+  currentVersion: string;
+  notes?: string;
+  publishedAt?: string;
+};
+
+export type AppUpdateEvent =
+  | { event: "started"; data: { contentLength?: number } }
+  | { event: "progress"; data: { downloaded: number; contentLength?: number } }
+  | { event: "finished" };
+
 export type ResourceAddress =
   | { type: "root" }
   | { type: "etcd"; keyBase64: string }
@@ -513,6 +525,15 @@ export function registryCapabilities() {
 
 export function exportDiagnosticBundle() {
   return invoke<DiagnosticExportReceipt | null>("export_diagnostic_bundle");
+}
+
+export function checkForAppUpdate() {
+  return invoke<AppUpdateInfo | null>("check_for_app_update");
+}
+
+export function installAppUpdate(onEvent: (event: AppUpdateEvent) => void) {
+  const channel = new Channel<AppUpdateEvent>(onEvent);
+  return invoke<void>("install_app_update", { onEvent: channel });
 }
 
 export function loadConnectionProfiles() {

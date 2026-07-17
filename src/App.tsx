@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { planProfileSelection } from "./profileSelection";
+import { UpdateDialog, type UpdateProgress } from "./UpdateDialog";
 import {
   MutationConfirmationDialog,
   NewResourceDialog,
@@ -24,6 +25,7 @@ import {
   ROOT_ADDRESS,
   applyImport,
   cancelOperation,
+  checkForAppUpdate,
   chooseImport,
   closeConnection,
   connectionEnvironmentLabels,
@@ -35,6 +37,7 @@ import {
   exportDiagnosticBundle,
   exportResource,
   inspectNativeResource,
+  installAppUpdate,
   isCancelled,
   isNotFound,
   isOutcomeUnknown,
@@ -55,6 +58,8 @@ import {
   upsertConnectionProfile,
   type AdapterDescriptor,
   type AdapterId,
+  type AppUpdateEvent,
+  type AppUpdateInfo,
   type AuditHistoryItem,
   type ConnectionProfile,
   type ConnectionSession,
@@ -306,6 +311,10 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [activeOperation, setActiveOperation] = useState<string>();
   const [message, setMessage] = useState<string>();
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo>();
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress>();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<ConnectionDialogMode>("new");
   const [testingConnection, setTestingConnection] = useState(false);
@@ -378,6 +387,59 @@ export function App() {
 
   const finishOperation = (operationId: string) => {
     setActiveOperation((current) => current === operationId ? undefined : current);
+  };
+
+  const checkForUpdates = async () => {
+    if (checkingUpdate || installingUpdate) return;
+    setCheckingUpdate(true);
+    setMessage(undefined);
+    try {
+      const update = await checkForAppUpdate();
+      if (!update) {
+        setMessage("当前已是最新版本");
+        return;
+      }
+      setUpdateProgress(undefined);
+      setAvailableUpdate(update);
+    } catch (reason) {
+      setMessage(errorMessage(reason));
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const installAvailableUpdate = async () => {
+    if (!availableUpdate || installingUpdate) return;
+    setInstallingUpdate(true);
+    setUpdateProgress({ phase: "downloading", downloaded: 0 });
+    setMessage(undefined);
+    const onEvent = (event: AppUpdateEvent) => {
+      if (event.event === "started") {
+        setUpdateProgress({
+          phase: "downloading",
+          downloaded: 0,
+          contentLength: event.data.contentLength,
+        });
+      } else if (event.event === "progress") {
+        setUpdateProgress({
+          phase: "downloading",
+          downloaded: event.data.downloaded,
+          contentLength: event.data.contentLength,
+        });
+      } else {
+        setUpdateProgress((current) => ({
+          phase: "installing",
+          downloaded: current?.downloaded ?? 0,
+          contentLength: current?.contentLength,
+        }));
+      }
+    };
+    try {
+      await installAppUpdate(onEvent);
+    } catch (reason) {
+      setInstallingUpdate(false);
+      setMessage(errorMessage(reason));
+    }
   };
 
   const runList = async (
@@ -1539,6 +1601,9 @@ export function App() {
           <span className="status-dot" />
           {capabilities ? `Rust Core · ${capabilities.length} adapters` : "正在启动 Rust Core…"}
         </div>
+        <button className="button update-button" disabled={checkingUpdate || installingUpdate} onClick={() => void checkForUpdates()}>
+          {checkingUpdate ? "检查中…" : "⇩ 更新"}
+        </button>
         <button className="button" disabled={busy} onClick={() => void exportDiagnostics()}>诊断包</button>
         <button className="button" onClick={openHistory}>历史</button>
         <button className="button primary" onClick={openNewConnection}>＋ 新建连接</button>
@@ -1734,6 +1799,16 @@ export function App() {
       </div>
 
       {message && <button className="toast" onClick={() => setMessage(undefined)}>{message}</button>}
+
+      {availableUpdate && (
+        <UpdateDialog
+          update={availableUpdate}
+          installing={installingUpdate}
+          progress={updateProgress}
+          onInstall={() => void installAvailableUpdate()}
+          onClose={() => setAvailableUpdate(undefined)}
+        />
+      )}
 
       {dialogOpen && (
         <ConnectionDialog

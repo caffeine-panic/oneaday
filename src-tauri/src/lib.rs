@@ -4,6 +4,7 @@ pub mod credentials;
 pub mod diagnostics;
 pub mod registry;
 pub mod transfer;
+pub mod updates;
 
 use registry::{
     AdapterDescriptor, AdapterId, ConnectionProbe, ConnectionProfile, ConnectionSession,
@@ -1570,9 +1571,11 @@ async fn stop_watch(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    configured_builder(tauri::Builder::default())
-        .run(tauri::generate_context!())
-        .expect("error while running Atlas Registry");
+    configured_builder(
+        tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build()),
+    )
+    .run(tauri::generate_context!())
+    .expect("error while running Atlas Registry");
 }
 
 fn configured_builder<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
@@ -1582,6 +1585,7 @@ fn configured_builder<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::B
         .manage(audit::AuditLog::default())
         .manage(CredentialVault::system())
         .manage(transfer::TransferService::default())
+        .manage(updates::PendingAppUpdate::default())
         .invoke_handler(tauri::generate_handler![
             registry_capabilities,
             export_diagnostic_bundle,
@@ -1612,7 +1616,9 @@ fn configured_builder<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::B
             load_audit_history,
             cancel_operation,
             start_watch,
-            stop_watch
+            stop_watch,
+            updates::check_for_app_update,
+            updates::install_app_update
         ])
 }
 
