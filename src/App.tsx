@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { planProfileSelection } from "./profileSelection";
 import {
   MutationConfirmationDialog,
   NewResourceDialog,
@@ -631,6 +632,10 @@ export function App() {
   };
 
   const selectProfile = async (profile: ConnectionProfile) => {
+    const session = sessions[profile.id];
+    const selectionPlan = planProfileSelection(selectedId, profile.id, Boolean(session));
+    if (selectionPlan === "preserve") return;
+
     await stopActiveWatch();
     setSelectedId(profile.id);
     setRows([]);
@@ -642,7 +647,18 @@ export function App() {
     setNativeInfo(undefined);
     showDocument(undefined);
     setSelectedAddress(undefined);
-    setMessage(sessions[profile.id] ? "连接会话已打开，点击刷新加载资源" : undefined);
+    setMessage(undefined);
+
+    if (selectionPlan === "reload" && session) {
+      setBusy(true);
+      try {
+        await reloadRoot(session.id);
+      } catch (reason) {
+        setMessage(errorMessage(reason));
+      } finally {
+        setBusy(false);
+      }
+    }
   };
 
   const refreshRoot = async () => {
