@@ -29,6 +29,17 @@ test("release workflow requires the private updater key without committing it", 
   assert.match(workflow, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD:\s*\$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY_PASSWORD \}\}/);
   assert.match(workflow, /test -n "\$TAURI_SIGNING_PRIVATE_KEY"/);
   assert.match(workflow, /test -n "\$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"/);
+  assert.match(workflow, /name: Configure macOS signing/);
+  assert.match(workflow, /if \[ -z "\$APPLE_CERTIFICATE" \]; then/);
+  assert.match(workflow, /APPLE_SIGNING_IDENTITY=-/);
+  assert.match(workflow, /includeUpdaterJson:\s*true/);
+  assert.doesNotMatch(workflow, /uploadUpdaterJson|uploadUpdaterSignatures/);
+
+  const jobEnvironment = workflow.match(/timeout-minutes:[\s\S]*?strategy:/)?.[0] ?? "";
+  assert.doesNotMatch(jobEnvironment, /APPLE_/);
+
+  const actionStep = workflow.slice(workflow.indexOf("- uses: tauri-apps/tauri-action"));
+  assert.doesNotMatch(actionStep, /APPLE_CERTIFICATE|APPLE_ID:|APPLE_PASSWORD:|APPLE_TEAM_ID:/);
   assert.match(qualityWorkflow, /"createUpdaterArtifacts":false/g);
   assert.match(ignore, /^\.codex\/$/m);
   assert.match(ignore, /^\*\.key$/m);
