@@ -1,14 +1,14 @@
 {
   "name": "atlas-registry",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "generate:contracts": "node scripts/clear-generated-contracts.mjs && cargo test --manifest-path src-tauri/Cargo.toml export_bindings",
     "lint": "eslint src",
-    "test:ui": "node --test scripts/operation-tracker.test.mjs scripts/resource-tree.test.mjs scripts/resource-workspace.test.mjs scripts/ui-layer-contract.test.mjs scripts/profile-selection.test.mjs scripts/registry-error.test.mjs scripts/updater-contract.test.mjs",
+    "test:ui": "node --test scripts/operation-tracker.test.mjs scripts/resource-tree.test.mjs scripts/resource-workspace.test.mjs scripts/ui-layer-contract.test.mjs scripts/profile-selection.test.mjs scripts/registry-error.test.mjs scripts/update-settings.test.mjs scripts/updater-contract.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

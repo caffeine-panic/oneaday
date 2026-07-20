@@ -23,6 +23,7 @@ import type { ConnectionProfile } from "./generated/ConnectionProfile";
 import type { NacosNativeAction } from "./generated/NacosNativeAction";
 import type { ResourceAddress } from "./generated/ResourceAddress";
 import type { WatchEvent } from "./generated/WatchEvent";
+import type { UpdateProxySettings } from "./updateSettings";
 
 export type AdapterDescriptor = {
   id: AdapterId;
@@ -470,8 +471,8 @@ export function exportDiagnosticBundle() {
   return invoke<DiagnosticExportReceipt | null>("export_diagnostic_bundle");
 }
 
-export function checkForAppUpdate() {
-  return invoke<AppUpdateInfo | null>("check_for_app_update");
+export function checkForAppUpdate(proxySettings: UpdateProxySettings) {
+  return invoke<AppUpdateInfo | null>("check_for_app_update", { proxySettings });
 }
 
 export function installAppUpdate(onEvent: (event: AppUpdateEvent) => void) {

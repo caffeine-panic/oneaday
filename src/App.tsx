@@ -12,6 +12,12 @@ import {
   type ResourceRow,
 } from "./resourceTree";
 import { UpdateDialog, type UpdateProgress } from "./UpdateDialog";
+import { SettingsDialog } from "./SettingsDialog";
+import {
+  loadUpdateProxySettings,
+  saveUpdateProxySettings,
+  type UpdateProxySettings,
+} from "./updateSettings";
 import {
   MutationConfirmationDialog,
   NewResourceDialog,
@@ -274,6 +280,10 @@ export function App() {
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress>();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [updateProxySettings, setUpdateProxySettings] = useState<UpdateProxySettings>(
+    loadUpdateProxySettings,
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<ConnectionDialogMode>("new");
   const [testingConnection, setTestingConnection] = useState(false);
@@ -354,7 +364,7 @@ export function App() {
     setCheckingUpdate(true);
     setMessage(undefined);
     try {
-      const update = await checkForAppUpdate();
+      const update = await checkForAppUpdate(updateProxySettings);
       if (!update) {
         setMessage("当前已是最新版本");
         return;
@@ -1532,6 +1542,7 @@ export function App() {
         <button className="button update-button" disabled={checkingUpdate || installingUpdate} onClick={() => void checkForUpdates()}>
           {checkingUpdate ? "检查中…" : "⇩ 更新"}
         </button>
+        <button className="button" disabled={checkingUpdate || installingUpdate} onClick={() => setSettingsOpen(true)}>⚙ 设置</button>
         <button className="button" disabled={busy} onClick={() => void exportDiagnostics()}>诊断包</button>
         <button className="button" onClick={openHistory}>历史</button>
         <button className="button primary" onClick={openNewConnection}>＋ 新建连接</button>
@@ -1728,6 +1739,19 @@ export function App() {
       </div>
 
       {message && <button className="toast" onClick={() => setMessage(undefined)}>{message}</button>}
+
+      {settingsOpen && (
+        <SettingsDialog
+          settings={updateProxySettings}
+          onSave={(settings) => {
+            const saved = saveUpdateProxySettings(settings);
+            setUpdateProxySettings(saved);
+            setSettingsOpen(false);
+            setMessage("更新网络设置已保存");
+          }}
+          onCancel={() => setSettingsOpen(false)}
+        />
+      )}
 
       {availableUpdate && (
         <UpdateDialog

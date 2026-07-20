@@ -56,9 +56,21 @@ test("update operations stay behind the audited Rust command surface", () => {
   assert.match(backend, /install_app_update/);
   assert.match(build, /"check_for_app_update"/);
   assert.match(build, /"install_app_update"/);
-  assert.match(frontend, /invoke<AppUpdateInfo \| null>\("check_for_app_update"\)/);
+  assert.match(frontend, /invoke<AppUpdateInfo \| null>\("check_for_app_update"/);
   assert.match(frontend, /invoke<void>\("install_app_update"/);
   assert.ok(capability.permissions.includes("allow-check-for-app-update"));
   assert.ok(capability.permissions.includes("allow-install-app-update"));
   assert.ok(!capability.permissions.includes("updater:default"));
+});
+
+test("update checks and downloads share the user-selected proxy policy", () => {
+  const manifest = read("src-tauri/Cargo.toml");
+  const backend = read("src-tauri/src/updates.rs");
+  const frontend = read("src/registry.ts");
+
+  assert.match(manifest, /reqwest[^\n]*version\s*=\s*"0\.13"[^\n]*"system-proxy"/);
+  assert.match(backend, /UpdateProxySettings/);
+  assert.match(backend, /\.proxy\(proxy\)/);
+  assert.match(backend, /\.no_proxy\(\)/);
+  assert.match(frontend, /invoke<AppUpdateInfo \| null>\("check_for_app_update", \{ proxySettings \}\)/);
 });

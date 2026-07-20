@@ -1,12 +1,40 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[derive(Default)]
 pub struct PendingAppUpdate(Mutex<Option<Update>>);
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum UpdateProxySettings {
+    System,
+    Manual { url: String },
+    Disabled,
+}
+
+impl UpdateProxySettings {
+    fn manual_url(&self) -> Result<Option<url::Url>, String> {
+        let Self::Manual { url } = self else {
+            return Ok(None);
+        };
+        let proxy =
+            url::Url::parse(url).map_err(|_| "更新代理地址无效，请在设置中检查".to_owned())?;
+        if !matches!(proxy.scheme(), "http" | "https") {
+            return Err("更新代理仅支持 HTTP 或 HTTPS 地址".to_owned());
+        }
+        if !proxy.username().is_empty() || proxy.password().is_some() {
+            return Err("更新代理地址不能包含用户名或密码".to_owned());
+        }
+        if proxy.path() != "/" || proxy.query().is_some() || proxy.fragment().is_some() {
+            return Err("更新代理地址只能包含协议、主机和端口".to_owned());
+        }
+        Ok(Some(proxy))
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,15 +64,25 @@ pub enum AppUpdateEvent {
 pub async fn check_for_app_update<R: Runtime>(
     app: AppHandle<R>,
     pending: State<'_, PendingAppUpdate>,
+    proxy_settings: UpdateProxySettings,
 ) -> Result<Option<AppUpdateInfo>, String> {
     *pending
         .0
         .lock()
         .map_err(|_| "更新状态不可用，请重启应用后重试".to_owned())? = None;
 
-    let update = app
-        .updater_builder()
-        .timeout(Duration::from_secs(30))
+    let builder = app.updater_builder().timeout(Duration::from_secs(30));
+    let builder = match &proxy_settings {
+        UpdateProxySettings::System => builder,
+        UpdateProxySettings::Manual { .. } => {
+            let proxy = proxy_settings
+                .manual_url()?
+                .expect("manual proxy URL should exist");
+            builder.proxy(proxy)
+        }
+        UpdateProxySettings::Disabled => builder.no_proxy(),
+    };
+    let update = builder
         .build()
         .map_err(|error| format!("初始化更新检查失败：{error}"))?
         .check()
@@ -113,7 +151,7 @@ pub async fn install_app_update<R: Runtime>(
 mod tests {
     use serde_json::json;
 
-    use super::{AppUpdateEvent, AppUpdateInfo};
+    use super::{AppUpdateEvent, AppUpdateInfo, UpdateProxySettings};
 
     #[test]
     fn update_metadata_and_progress_keep_the_frontend_contract() {
@@ -142,6 +180,29 @@ mod tests {
                 "event": "progress",
                 "data": { "downloaded": 512, "contentLength": 1024 },
             })
+        );
+    }
+
+    #[test]
+    fn manual_update_proxy_rejects_credentials_and_non_http_schemes() {
+        let credentials = UpdateProxySettings::Manual {
+            url: "http://user:secret@127.0.0.1:7897/".to_owned(),
+        };
+        assert_eq!(
+            credentials
+                .manual_url()
+                .expect_err("credentials must be rejected"),
+            "更新代理地址不能包含用户名或密码"
+        );
+
+        let socks = UpdateProxySettings::Manual {
+            url: "socks5://127.0.0.1:7897/".to_owned(),
+        };
+        assert_eq!(
+            socks
+                .manual_url()
+                .expect_err("SOCKS is not compiled into the updater"),
+            "更新代理仅支持 HTTP 或 HTTPS 地址"
         );
     }
 }

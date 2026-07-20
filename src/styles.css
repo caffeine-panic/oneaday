@@ -316,6 +316,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   box-shadow: 0 24px 80px #000b;
 }
 .connection-dialog { width: min(720px, 100%); max-height: calc(100vh - 48px); overflow: auto; }
+.settings-dialog { width: min(620px, 100%); }
 .dialog-heading { display: flex; align-items: start; justify-content: space-between; margin-bottom: 20px; }
 .dialog-heading h2 { margin: 0; }
 .dialog label { display: grid; gap: 7px; margin-bottom: 15px; color: #a9b7c8; font-size: 12px; font-weight: 700; }
@@ -323,8 +324,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .form-grid { display: grid; grid-template-columns: 1fr 160px; gap: 12px; }
 .form-grid.equal { grid-template-columns: 1fr 1fr; }
 .form-note { padding: 10px 12px; border-radius: 9px; color: #91a0b2; background: #0b121c; font-size: 12px; line-height: 1.55; }
+.form-error { margin-top: 12px; color: #ff9ca2; font-size: 12px; line-height: 1.5; }
 .form-section { margin: 18px 0; padding: 15px; border: 1px solid #263447; border-radius: 12px; background: #0d151f; }
 .form-section-title { margin-bottom: 12px; color: #d5e0eb; font-size: 13px; font-weight: 800; }
+.proxy-options { display: grid; gap: 9px; }
+.dialog .proxy-options label { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 10px; margin: 0; padding: 12px; border: 1px solid #263447; border-radius: 10px; background: #0b121c; cursor: pointer; }
+.dialog .proxy-options label.selected { border-color: #3a655f; background: #10231f; }
+.dialog .proxy-options input[type="radio"] { width: 16px; height: 16px; margin: 2px 0 0; accent-color: #55d6be; }
+.proxy-options span { display: grid; gap: 4px; }
+.proxy-options b { color: #d7e2ee; font-size: 13px; }
+.proxy-options small { color: #8394a9; font-size: 11px; font-weight: 400; line-height: 1.5; }
 .dialog label.checkbox-label { display: flex; grid-template-columns: auto 1fr; align-items: center; gap: 9px; }
 .dialog label.checkbox-label input { width: 16px; height: 16px; margin: 0; accent-color: #55d6be; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
