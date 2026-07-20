@@ -1,14 +1,28 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import {
+  isRegistryError,
+  registryErrorMessage,
+  type RegistryError,
+} from "./registryError";
 
-export type AdapterId = "etcd" | "zookeeper" | "nacos";
-export type NacosApiVersion = "v2" | "v3";
-export type ConnectionEnvironment =
-  | "unspecified"
-  | "development"
-  | "testing"
-  | "staging"
-  | "production";
-export type AuthenticationMode = "none" | "usernamePassword" | "digest" | "custom";
+export type { RegistryError, RegistryErrorCode } from "./registryError";
+export { mutationFailureRecovery } from "./registryError";
+export type { AdapterId } from "./generated/AdapterId";
+export type { AuthenticationMode } from "./generated/AuthenticationMode";
+export type { ConnectionEnvironment } from "./generated/ConnectionEnvironment";
+export type { ConnectionProfile } from "./generated/ConnectionProfile";
+export type { NacosApiVersion } from "./generated/NacosApiVersion";
+export type { NacosNativeAction } from "./generated/NacosNativeAction";
+export type { ResourceAddress } from "./generated/ResourceAddress";
+export type { WatchEvent } from "./generated/WatchEvent";
+export type { WatchStatusState } from "./generated/WatchStatusState";
+
+import type { AdapterId } from "./generated/AdapterId";
+import type { ConnectionEnvironment } from "./generated/ConnectionEnvironment";
+import type { ConnectionProfile } from "./generated/ConnectionProfile";
+import type { NacosNativeAction } from "./generated/NacosNativeAction";
+import type { ResourceAddress } from "./generated/ResourceAddress";
+import type { WatchEvent } from "./generated/WatchEvent";
 
 export type AdapterDescriptor = {
   id: AdapterId;
@@ -31,28 +45,6 @@ export type AdapterDescriptor = {
     | "service"
     | "instance"
   >;
-};
-
-export type ConnectionProfile = {
-  id: string;
-  name: string;
-  adapter: AdapterId;
-  endpoint: string;
-  namespace: string;
-  nacosApiVersion: NacosApiVersion;
-  environment: ConnectionEnvironment;
-  auth: {
-    mode: AuthenticationMode;
-    username: string;
-    customKey: string;
-  };
-  tls: {
-    enabled: boolean;
-    caCertificatePath: string;
-    clientCertificatePath: string;
-    clientKeyPath: string;
-    serverName: string;
-  };
 };
 
 export type CredentialUpdate = {
@@ -100,13 +92,6 @@ export type AppUpdateEvent =
   | { event: "started"; data: { contentLength?: number } }
   | { event: "progress"; data: { downloaded: number; contentLength?: number } }
   | { event: "finished" };
-
-export type ResourceAddress =
-  | { type: "root" }
-  | { type: "etcd"; keyBase64: string }
-  | { type: "etcdPrefix"; prefixBase64: string }
-  | { type: "zookeeper"; path: string }
-  | { type: "nacosConfig"; group: string; dataId: string };
 
 export type ResourceNode = {
   address: ResourceAddress;
@@ -253,17 +238,6 @@ export type NacosInstance = {
   fingerprint: string;
 };
 
-export type NacosNativeAction =
-  | { action: "createNamespace"; namespaceId: string; name: string; description: string }
-  | { action: "updateNamespace"; namespaceId: string; name: string; description: string; expectedFingerprint: string }
-  | { action: "deleteNamespace"; namespaceId: string; expectedFingerprint: string }
-  | { action: "createService"; group: string; serviceName: string; protectThreshold: number; ephemeral: boolean; metadata: Record<string, string> }
-  | { action: "updateService"; group: string; serviceName: string; protectThreshold: number; ephemeral: boolean; metadata: Record<string, string>; expectedFingerprint: string }
-  | { action: "deleteService"; group: string; serviceName: string; expectedFingerprint: string }
-  | { action: "registerInstance"; group: string; serviceName: string; cluster: string; ip: string; port: number; weight: number; enabled: boolean; ephemeral: boolean; metadata: Record<string, string> }
-  | { action: "updateInstance"; group: string; serviceName: string; cluster: string; ip: string; port: number; weight: number; enabled: boolean; ephemeral: boolean; metadata: Record<string, string>; expectedFingerprint: string }
-  | { action: "deregisterInstance"; group: string; serviceName: string; cluster: string; ip: string; port: number; ephemeral: boolean; expectedFingerprint: string };
-
 export type NacosNativeOperation = NacosNativeAction["action"];
 
 export type NacosNativeActionResult = {
@@ -283,12 +257,6 @@ export type ResourceDocument = {
   contentType?: string;
   version?: string;
   metadata: Record<string, string>;
-};
-
-export type RegistryError = {
-  code: string;
-  message: string;
-  retryable: boolean;
 };
 
 export type ValueEncoding = "utf8" | "base64";
@@ -485,31 +453,6 @@ export type AuditHistoryPage = {
   scannedBytes: number;
   exhaustive: boolean;
 };
-
-export type WatchStatusState =
-  | "starting"
-  | "live"
-  | "reconnecting"
-  | "compacted"
-  | "sessionExpired"
-  | "stopped"
-  | "failed";
-
-export type WatchEvent =
-  | {
-      kind: "status";
-      subscriptionId: string;
-      state: WatchStatusState;
-      message?: string;
-      retryInMs?: number;
-    }
-  | {
-      kind: "change";
-      subscriptionId: string;
-      change: "created" | "updated" | "deleted" | "childrenChanged";
-      address: ResourceAddress;
-      version?: string;
-    };
 
 export type WatchHandle = {
   subscriptionId: string;
@@ -805,25 +748,27 @@ export function stopWatch(subscriptionId: string) {
 }
 
 export function errorMessage(reason: unknown): string {
-  if (typeof reason === "string") return reason;
-  if (reason && typeof reason === "object" && "message" in reason) {
-    return String((reason as RegistryError).message);
-  }
-  return String(reason);
+  return registryErrorMessage(reason);
 }
 
 export function isCancelled(reason: unknown): boolean {
-  return Boolean(reason && typeof reason === "object" && "code" in reason && reason.code === "cancelled");
+  return isRegistryError(reason, "cancelled");
 }
 
 export function isOutcomeUnknown(reason: unknown): boolean {
-  return Boolean(
-    reason && typeof reason === "object" && "code" in reason && reason.code === "outcomeUnknown",
-  );
+  return isRegistryError(reason, "outcomeUnknown");
 }
 
 export function isNotFound(reason: unknown): boolean {
-  return Boolean(reason && typeof reason === "object" && "code" in reason && reason.code === "notFound");
+  return isRegistryError(reason, "notFound");
+}
+
+export function isConflict(reason: unknown): boolean {
+  return isRegistryError(reason, "conflict");
+}
+
+export function isAuditIncomplete(reason: unknown): boolean {
+  return isRegistryError(reason, "auditIncomplete");
 }
 
 export function newConnectionId(): string {

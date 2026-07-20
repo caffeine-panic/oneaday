@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useRegistryOperations } from "./useRegistryOperations";
 import {
   cancelOperation,
   connectionEnvironmentLabels,
@@ -8,7 +9,6 @@ import {
   listNacosInstances,
   listNacosNamespaces,
   listNacosServices,
-  newConnectionId,
   readNacosService,
 } from "./registry";
 import type {
@@ -68,8 +68,7 @@ function actionImpact(action: NacosNativeAction) {
 
 export function NacosNativeDialog({ profile, connectionId, onMessage, onClose }: Props) {
   const [tab, setTab] = useState<Tab>("services");
-  const [busy, setBusy] = useState(false);
-  const [activeOperation, setActiveOperation] = useState<string>();
+  const [busy, setBusy] = useState(true);
   const [localError, setLocalError] = useState<string>();
   const [namespaces, setNamespaces] = useState<NacosNamespace[]>([]);
   const [services, setServices] = useState<NacosService[]>([]);
@@ -84,25 +83,49 @@ export function NacosNativeDialog({ profile, connectionId, onMessage, onClose }:
   const [groupFilter, setGroupFilter] = useState("DEFAULT_GROUP");
   const [pending, setPending] = useState<NacosNativeAction>();
   const [confirmation, setConfirmation] = useState("");
+  const operations = useRegistryOperations<"nacos">(crypto.randomUUID.bind(crypto), cancelOperation);
+  const runOperation = operations.run;
+  const cancelTrackedOperation = operations.cancel;
 
   useEffect(() => {
+    let disposed = false;
     void (async () => {
-      await refreshNamespaces();
-      await refreshServices(false);
-    })();
-  }, []);
+      const loadedNamespaces = await runOperation(
+        "nacos",
+        (operationId) => listNacosNamespaces(connectionId, operationId),
+      );
+      if (disposed) return;
+      const page = await runOperation(
+        "nacos",
+        (operationId) => listNacosServices(
+          connectionId,
+          "DEFAULT_GROUP",
+          operationId,
+        ),
+      );
+      if (disposed) return;
+      setNamespaces(loadedNamespaces);
+      setServices(page.items);
+      setServiceCursor(page.nextCursor);
+    })().catch((reason: unknown) => {
+      if (!disposed) setLocalError(errorMessage(reason));
+    }).finally(() => {
+      if (!disposed) setBusy(false);
+    });
+    return () => {
+      disposed = true;
+      void cancelTrackedOperation("nacos");
+    };
+  }, [cancelTrackedOperation, connectionId, runOperation]);
 
   const run = async <T,>(operation: (operationId: string) => Promise<T>) => {
     if (busy) throw new Error("已有 Nacos 请求正在执行");
-    const operationId = newConnectionId();
     setBusy(true);
-    setActiveOperation(operationId);
     setLocalError(undefined);
     try {
-      return await operation(operationId);
+      return await operations.run("nacos", operation);
     } finally {
       setBusy(false);
-      setActiveOperation(undefined);
     }
   };
 
@@ -281,7 +304,7 @@ export function NacosNativeDialog({ profile, connectionId, onMessage, onClose }:
   };
 
   const cancel = async () => {
-    if (activeOperation) await cancelOperation(activeOperation);
+    await operations.cancel("nacos");
   };
 
   return (

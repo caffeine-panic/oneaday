@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { connectionEnvironmentLabels } from "./registry";
 import type {
   ConnectionProfile,
@@ -44,11 +44,6 @@ export function EtcdLeaseDialog({
   const [confirmation, setConfirmation] = useState("");
   const hasLease = Boolean(info);
   const currentLeaseId = info?.leaseId ?? leaseId.trim();
-
-  useEffect(() => {
-    setMode(info ? "keepAlive" : "grantAndAttach");
-    setConfirmation("");
-  }, [info?.leaseId]);
 
   const validTtl = (value: string) => {
     if (!/^[1-9]\d*$/.test(value.trim())) return false;

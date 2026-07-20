@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { connectionEnvironmentLabels } from "./registry";
 import type {
   ConnectionProfile,
@@ -38,13 +38,10 @@ export function ZookeeperAclDialog({
   onCancelOperation,
   onClose,
 }: AclDialogProps) {
-  const [entries, setEntries] = useState<ZookeeperAclEntry[]>([]);
+  const [entries, setEntries] = useState<ZookeeperAclEntry[]>(
+    () => info?.entries.map((entry) => ({ ...entry, permissions: [...entry.permissions] })) ?? [],
+  );
   const [confirmation, setConfirmation] = useState("");
-
-  useEffect(() => {
-    setEntries(info?.entries.map((entry) => ({ ...entry, permissions: [...entry.permissions] })) ?? []);
-    setConfirmation("");
-  }, [info?.aclVersion]);
 
   const validation = useMemo(() => validateAcl(entries), [entries]);
   const changed = Boolean(info) && JSON.stringify(entries) !== JSON.stringify(info?.entries);

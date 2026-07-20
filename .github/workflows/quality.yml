@@ -64,11 +64,23 @@ jobs:
       - name: Lint Rust targets
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
+      - name: Clear generated TypeScript contracts
+        run: node scripts/clear-generated-contracts.mjs
+
       - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --quiet
 
+      - name: Verify generated TypeScript contracts are current
+        run: node scripts/verify-generated-contracts.mjs
+
       - name: Build frontend
         run: npm run build
+
+      - name: Lint frontend
+        run: npm run lint
+
+      - name: Test frontend behavior
+        run: npm run test:ui
 
       - name: Configure ad-hoc macOS signing for CI bundles
         if: runner.os == 'macOS'

@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { planProfileSelection } from "./profileSelection";
+import { useRegistryOperations } from "./useRegistryOperations";
+import { useResourceWorkspace } from "./useResourceWorkspace";
+import {
+  collapseResourceRow,
+  expandResourceRow,
+  pageRows,
+  replaceContinuationRow,
+  searchPageRows,
+  type MoreRow,
+  type ResourceRow,
+} from "./resourceTree";
 import { UpdateDialog, type UpdateProgress } from "./UpdateDialog";
 import {
   MutationConfirmationDialog,
@@ -47,6 +58,7 @@ import {
   loadConnectionProfiles,
   newConnectionId,
   mutateResource,
+  mutationFailureRecovery,
   openConnection,
   probeConnection,
   readResource,
@@ -68,10 +80,8 @@ import {
   type ImportPreview,
   type NativeResourceInfo,
   type ResourceAddress,
-  type ResourceDocument,
   type ResourceHistoryDocument,
   type ResourceHistoryEntry,
-  type ResourceNode,
   type ResourceMutation,
   type WatchEvent,
   type WatchHandle,
@@ -79,25 +89,6 @@ import {
   type ZookeeperNativeAction,
 } from "./registry";
 
-type ResourceRow = {
-  kind: "resource";
-  node: ResourceNode;
-  depth: number;
-  expanded: boolean;
-};
-
-type MoreRow = {
-  kind: "more";
-  parent: ResourceAddress;
-  cursor: string;
-  depth: number;
-  search?: {
-    scope: ResourceAddress;
-    query: string;
-  };
-};
-
-type TreeRow = ResourceRow | MoreRow;
 type WatchChangeEvent = Extract<WatchEvent, { kind: "change" }>;
 
 type ResourceWatchView = {
@@ -109,13 +100,6 @@ type ResourceWatchView = {
   changeCount: number;
   lastChange?: WatchChangeEvent;
   remoteChanged: boolean;
-};
-
-type ActiveSearch = {
-  scope: ResourceAddress;
-  query: string;
-  scanned: number;
-  exhaustive: boolean;
 };
 
 const watchStatusLabels: Record<WatchStatusState, string> = {
@@ -161,42 +145,6 @@ const emptyResourceDraft = (adapter: AdapterId): NewResourceDraft => ({
   contentType: "text",
   zookeeperMode: "persistent",
 });
-
-function pageRows(
-  items: ResourceNode[],
-  depth: number,
-  parent: ResourceAddress,
-  nextCursor?: string,
-): TreeRow[] {
-  const rows: TreeRow[] = items.map((node) => ({
-    kind: "resource",
-    node,
-    depth,
-    expanded: false,
-  }));
-  if (nextCursor) {
-    rows.push({ kind: "more", parent, cursor: nextCursor, depth });
-  }
-  return rows;
-}
-
-function searchPageRows(
-  items: ResourceNode[],
-  scope: ResourceAddress,
-  query: string,
-  nextCursor?: string,
-): TreeRow[] {
-  const rows: TreeRow[] = items.map((node) => ({
-    kind: "resource",
-    node,
-    depth: 0,
-    expanded: false,
-  }));
-  if (nextCursor) {
-    rows.push({ kind: "more", parent: scope, cursor: nextCursor, depth: 0, search: { scope, query } });
-  }
-  return rows;
-}
 
 function connectionLabel(adapter: AdapterId) {
   return adapter === "zookeeper" ? "ZK" : adapter;
@@ -301,15 +249,26 @@ export function App() {
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [sessions, setSessions] = useState<Record<string, ConnectionSession>>({});
   const [selectedId, setSelectedId] = useState<string>();
-  const [rows, setRows] = useState<TreeRow[]>([]);
-  const [document, setDocument] = useState<ResourceDocument>();
-  const [draftValue, setDraftValue] = useState("");
-  const [selectedAddress, setSelectedAddress] = useState<ResourceAddress>();
-  const [filter, setFilter] = useState("");
-  const [resourceQuery, setResourceQuery] = useState("");
-  const [activeSearch, setActiveSearch] = useState<ActiveSearch>();
+  const {
+    state: {
+      rows,
+      document,
+      draftValue,
+      selectedAddress,
+      filter,
+      resourceQuery,
+      activeSearch,
+    },
+    clearView,
+    showDocument,
+    setRows,
+    setDraftValue,
+    setSelectedAddress,
+    setFilter,
+    setResourceQuery,
+    setActiveSearch,
+  } = useResourceWorkspace();
   const [busy, setBusy] = useState(false);
-  const [activeOperation, setActiveOperation] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -352,6 +311,11 @@ export function App() {
   const watchHandle = useRef<WatchHandle | undefined>(undefined);
   const watchGeneration = useRef(0);
   const historyGeneration = useRef(0);
+  const operations = useRegistryOperations<"main" | "serverHistory">(
+    newConnectionId,
+    cancelOperation,
+  );
+  const activeOperation = operations.active.main;
 
   const selectedProfile = profiles.find((profile) => profile.id === selectedId);
   const selectedSession = selectedId ? sessions[selectedId] : undefined;
@@ -379,14 +343,10 @@ export function App() {
     );
   }, [filter, rows]);
 
-  const startOperation = () => {
-    const operationId = newConnectionId();
-    setActiveOperation(operationId);
-    return operationId;
-  };
+  const startOperation = () => operations.start("main");
 
   const finishOperation = (operationId: string) => {
-    setActiveOperation((current) => current === operationId ? undefined : current);
+    operations.finish("main", operationId);
   };
 
   const checkForUpdates = async () => {
@@ -478,11 +438,6 @@ export function App() {
     }
   };
 
-  const showDocument = (nextDocument: ResourceDocument | undefined) => {
-    setDocument(nextDocument);
-    setDraftValue(nextDocument?.value.content ?? "");
-  };
-
   const releaseActiveWatch = async (clearView = true) => {
     const active = watchHandle.current;
     watchHandle.current = undefined;
@@ -512,8 +467,8 @@ export function App() {
         return {
           ...current,
           state: event.state,
-          message: event.message,
-          retryInMs: event.retryInMs,
+          message: event.message ?? undefined,
+          retryInMs: event.retryInMs ?? undefined,
           remoteChanged: event.state === "compacted" ? true : current.remoteChanged,
         };
       }
@@ -608,9 +563,8 @@ export function App() {
   };
 
   const cancelActiveOperation = async () => {
-    if (!activeOperation) return;
     try {
-      await cancelOperation(activeOperation);
+      await operations.cancel("main");
     } catch (reason) {
       setMessage(errorMessage(reason));
     }
@@ -618,12 +572,12 @@ export function App() {
 
   const connectAndLoad = async (profile: ConnectionProfile, transientSecret?: string) => {
     await stopActiveWatch();
+    await operations.cancel("serverHistory").catch(() => false);
     setNativeInfoOpen(false);
     setNativeInfo(undefined);
     setBusy(true);
     setMessage(undefined);
-    showDocument(undefined);
-    setRows([]);
+    clearView();
     try {
       const operationId = startOperation();
       let session: ConnectionSession;
@@ -699,16 +653,14 @@ export function App() {
     if (selectionPlan === "preserve") return;
 
     await stopActiveWatch();
+    await operations.cancel("serverHistory").catch(() => false);
     setSelectedId(profile.id);
-    setRows([]);
-    setActiveSearch(undefined);
+    clearView();
     setExportDialogOpen(false);
     setImportPreview(undefined);
     setServerHistoryOpen(false);
     setNativeInfoOpen(false);
     setNativeInfo(undefined);
-    showDocument(undefined);
-    setSelectedAddress(undefined);
     setMessage(undefined);
 
     if (selectionPlan === "reload" && session) {
@@ -825,37 +777,14 @@ export function App() {
 
     if (row.node.hasChildren === false) return;
     if (row.expanded) {
-      setRows((current) => {
-        const next = [...current];
-        next[index] = { ...row, expanded: false };
-        let end = index + 1;
-        while (end < next.length && next[end].depth > row.depth) end += 1;
-        next.splice(index + 1, end - index - 1);
-        return next;
-      });
+      setRows((current) => collapseResourceRow(current, index, row.node.address));
       return;
     }
 
     setBusy(true);
     try {
       const page = await runList(selectedSession.id, row.node.address);
-      setRows((current) => {
-        const next = [...current];
-        next[index] = {
-          ...row,
-          expanded: page.items.length > 0,
-          node: {
-            ...row.node,
-            hasChildren: page.items.length > 0 || Boolean(page.nextCursor),
-          },
-        };
-        next.splice(
-          index + 1,
-          0,
-          ...pageRows(page.items, row.depth + 1, page.parent, page.nextCursor),
-        );
-        return next;
-      });
+      setRows((current) => expandResourceRow(current, index, page));
     } catch (reason) {
       setMessage(errorMessage(reason));
     } finally {
@@ -874,30 +803,24 @@ export function App() {
           row.search.query,
           row.cursor,
         );
-        setRows((current) => {
-          const next = [...current];
-          next.splice(
-            index,
-            1,
-            ...searchPageRows(page.items, page.scope, row.search!.query, page.nextCursor),
-          );
-          return next;
-        });
+        setRows((current) => replaceContinuationRow(
+          current,
+          index,
+          searchPageRows(page.items, page.scope, row.search!.query, page.nextCursor),
+          row,
+        ));
         setActiveSearch((current) => current
           ? { ...current, scanned: current.scanned + page.scanned, exhaustive: page.exhaustive }
           : current);
         return;
       }
       const page = await runList(selectedSession.id, row.parent, row.cursor);
-      setRows((current) => {
-        const next = [...current];
-        next.splice(
-          index,
-          1,
-          ...pageRows(page.items, row.depth, page.parent, page.nextCursor),
-        );
-        return next;
-      });
+      setRows((current) => replaceContinuationRow(
+        current,
+        index,
+        pageRows(page.items, row.depth, page.parent, page.nextCursor),
+        row,
+      ));
     } catch (reason) {
       setMessage(errorMessage(reason));
     } finally {
@@ -1012,14 +935,15 @@ export function App() {
     } catch (reason) {
       finishOperation(operationId);
       const message = errorMessage(reason);
-      if (isOutcomeUnknown(reason) || message.includes("mutation succeeded")) {
+      const recovery = mutationFailureRecovery(reason);
+      if (recovery === "unknownOutcome") {
         const reconciled = await reconcileUnknownMutation(selectedSession.id, mutation.address);
         setPendingMutation(undefined);
         setMessage(reconciled
           ? `${message}；已重新读取远端状态`
           : `${message}；自动回读失败，远端结果仍未知，请先恢复连接并刷新，勿直接重试`);
       } else {
-        if (reason && typeof reason === "object" && "code" in reason && reason.code === "conflict") {
+        if (recovery === "conflict") {
           const reconciled = await reconcileUnknownMutation(selectedSession.id, mutation.address);
           setPendingMutation(undefined);
           setMessage(reconciled ? message : `${message}；自动刷新失败，请恢复连接后手动刷新`);
@@ -1201,7 +1125,7 @@ export function App() {
     if (!selectedSession) return;
     setServerHistoryLoading(true);
     setMessage(undefined);
-    const operationId = startOperation();
+    const operationId = operations.start("serverHistory");
     try {
       const page = await listResourceHistory(
         selectedSession.id,
@@ -1209,13 +1133,17 @@ export function App() {
         operationId,
         cursor,
       );
+      if (!operations.isCurrent("serverHistory", operationId)) return;
       setServerHistoryItems((current) => append ? [...current, ...page.items] : page.items);
       setServerHistoryCursor(page.nextCursor);
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      if (operations.isCurrent("serverHistory", operationId)) {
+        setMessage(errorMessage(reason));
+      }
     } finally {
-      finishOperation(operationId);
-      setServerHistoryLoading(false);
+      const current = operations.isCurrent("serverHistory", operationId);
+      operations.finish("serverHistory", operationId);
+      if (current) setServerHistoryLoading(false);
     }
   };
 
@@ -1234,19 +1162,23 @@ export function App() {
     if (!selectedSession || !serverHistoryAddress || serverHistoryLoading) return;
     setServerHistoryLoading(true);
     setMessage(undefined);
-    const operationId = startOperation();
+    const operationId = operations.start("serverHistory");
     try {
-      setServerHistoryDetail(await readResourceHistory(
+      const detail = await readResourceHistory(
         selectedSession.id,
         serverHistoryAddress,
         entry.revisionId,
         operationId,
-      ));
+      );
+      if (operations.isCurrent("serverHistory", operationId)) setServerHistoryDetail(detail);
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      if (operations.isCurrent("serverHistory", operationId)) {
+        setMessage(errorMessage(reason));
+      }
     } finally {
-      finishOperation(operationId);
-      setServerHistoryLoading(false);
+      const current = operations.isCurrent("serverHistory", operationId);
+      operations.finish("serverHistory", operationId);
+      if (current) setServerHistoryLoading(false);
     }
   };
 
@@ -1492,6 +1424,7 @@ export function App() {
   const disconnect = async () => {
     if (!selectedSession) return;
     await stopActiveWatch();
+    await operations.cancel("serverHistory").catch(() => false);
     try {
       await closeConnection(selectedSession.id);
     } catch {
@@ -1502,15 +1435,13 @@ export function App() {
       delete next[selectedSession.id];
       return next;
     });
-    setRows([]);
-    setActiveSearch(undefined);
+    clearView();
     setExportDialogOpen(false);
     setImportPreview(undefined);
     setServerHistoryOpen(false);
     setNativeInfoOpen(false);
     setNativeInfo(undefined);
     setEtcdTransactionOpen(false);
-    showDocument(undefined);
     setPendingMutation(undefined);
     setPendingZookeeperAction(undefined);
     setNacosNativeOpen(false);
@@ -1567,15 +1498,12 @@ export function App() {
       });
       if (selectedId === form.id) {
         setSelectedId(undefined);
-        setRows([]);
-        setActiveSearch(undefined);
+        clearView();
         setExportDialogOpen(false);
         setImportPreview(undefined);
         setServerHistoryOpen(false);
         setNativeInfoOpen(false);
         setNativeInfo(undefined);
-        showDocument(undefined);
-        setSelectedAddress(undefined);
       }
       setDialogOpen(false);
       setConnectionSecret("");
@@ -1622,6 +1550,7 @@ export function App() {
             <button
               className={`connection ${profile.id === selectedId ? "active" : ""}`}
               key={profile.id}
+              disabled={busy}
               onClick={() => void selectProfile(profile)}
             >
               <span className={`status-dot ${sessions[profile.id] ? "" : "offline"}`} />
@@ -1943,6 +1872,7 @@ export function App() {
         && document?.address.type === "etcd"
         && (
         <EtcdLeaseDialog
+          key={nativeInfo?.kind === "etcdLease" ? nativeInfo.leaseId : "unbound"}
           profile={selectedProfile}
           document={document}
           info={nativeInfo?.kind === "etcdLease" ? nativeInfo : undefined}
@@ -1959,6 +1889,7 @@ export function App() {
 
       {nativeInfoOpen && selectedProfile?.adapter === "zookeeper" && (
         document?.address.type === "zookeeper" && <ZookeeperAclDialog
+          key={nativeInfo?.kind === "zookeeperAcl" ? nativeInfo.aclVersion : "loading"}
           profile={selectedProfile}
           document={document}
           info={nativeInfo?.kind === "zookeeperAcl" ? nativeInfo : undefined}

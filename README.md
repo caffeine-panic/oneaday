@@ -1,50 +1,95 @@
 # Atlas Registry
 
-跨平台桌面客户端，用一个界面访问 etcd、ZooKeeper 和 Nacos。
+Atlas Registry 是一个跨平台桌面客户端，用统一的资源管理器访问 etcd、ZooKeeper 和 Nacos。它适合日常浏览配置、排查注册信息，以及执行带版本校验和审计记录的受控变更。
 
-技术 Spike 已结束，项目进入正式开发阶段。当前已建立以下产品链路：
+## 下载与安装
 
-```text
-React/TypeScript UI → Tauri 2 command → Rust RegistryCatalog → native protocol adapters
-```
+前往 [GitHub Releases](https://github.com/caffeine-panic/oneaday/releases) 下载对应平台的安装包：
+
+- macOS：DMG
+- Windows：MSI 或 NSIS 安装程序
+- Linux：DEB 或 AppImage
+
+应用内可以从标题栏检查更新。更新包会在本地完成签名验证后再安装。
+
+## 主要能力
+
+### 统一资源浏览
+
+- 用三栏资源管理器浏览、搜索和精确定位资源
+- 分页、懒加载和可取消请求，支持大规模子节点
+- 延迟读取 value，文本与二进制内容均可无损展示
+- 监听资源变化，并在断线后按协议能力自动恢复
+
+### 安全变更
+
+- 创建、更新和删除均要求明确确认
+- etcd 使用 revision、ZooKeeper 使用 version、Nacos 使用 MD5 或状态指纹进行条件变更
+- 网络结果不确定时会提示核对远端状态，避免盲目重试
+- 所有变更写入脱敏审计记录，不记录 value、密码或 token
+
+### 协议原生功能
+
+| 协议 | 原生能力 |
+| --- | --- |
+| etcd | Lease 创建、绑定、续租、解绑和撤销；2–32 项原子事务 |
+| ZooKeeper | ACL 查看与条件编辑；持久、顺序和临时节点 |
+| Nacos | 配置历史；namespace、service 和 instance 管理；Nacos 2.x / 3.x |
+
+协议特性不会被强行抹平：通用界面负责连接和资源操作，各协议的原生语义仍通过专用入口呈现。
+
+## 连接与凭据
+
+Atlas Registry 支持：
+
+- etcd 用户名/密码与 TLS
+- ZooKeeper Digest 认证与 TLS
+- Nacos 用户名/密码或自定义认证上下文
+
+连接配置保存在本机应用目录，密钥保存在系统凭据库。临时密钥只用于当前连接，不写入连接配置。
+
+## 导入、导出与诊断
+
+- 资源导出默认不包含 value；只有显式选择后才会导出正文
+- 含 value 的导入计划只在 Rust 进程中短暂保存，并且只能使用一次
+- 诊断包只包含运行环境、协议能力和连接数量等聚合信息，不包含连接名称、endpoint、namespace、value 或凭据
+
+## 使用提示
+
+1. 新建连接并先执行“测试连接”。
+2. 连接成功后，从左侧选择资源，在中间区域浏览层级。
+3. 修改或删除前确认当前版本；如果远端已变化，先刷新再决定是否继续。
+4. 对生产环境执行写操作前，核对连接名称、目标资源和影响摘要。
+5. 遇到“远端结果未知”时先刷新或到服务端核对，不要直接重复提交。
 
 ## 本地开发
 
-需要 Node.js、Rust stable、`protoc`，以及对应平台的 Tauri 系统依赖。
-
-macOS 可安装：
-
-```bash
-brew install rust protobuf
-```
+需要 Node.js、Rust stable、`protoc`，以及对应平台的 Tauri 2 系统依赖。
 
 ```bash
 npm install
 npm run tauri dev
 ```
 
-单独运行检查：
+提交前运行：
 
 ```bash
+npm run lint
+npm run test:ui
 npm run build
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-最终架构决策见 [docs/ADR-0001-TAURI-PURE-RUST.md](docs/ADR-0001-TAURI-PURE-RUST.md)，早期技术调研见 [docs/TECH_STACK_RESEARCH.md](docs/TECH_STACK_RESEARCH.md)。原始界面方案位于 `prototype/registry-client/`，正式界面以方案 A（三栏资源管理器）为基础。
+真实服务验证和开发环境说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)，发布流程见 [docs/RELEASING.md](docs/RELEASING.md)。
 
-## 已实现能力
+## 已知限制
 
-- 连接：新建、编辑、复制、删除、探测，系统凭据库，三协议认证与 TLS，长生命周期原生会话。
-- 通用资源：可取消的分页/懒加载、值延迟读取、有界标识搜索、精确定位、二进制无损展示、1 MiB 内联边界、条件创建/更新/删除、监听、导入导出和脱敏审计历史。
-- etcd：mod revision 条件写、watch、Lease 创建并绑定/绑定已有/单次续租/解绑/撤销，以及 2–32 项、总载荷不超过 1 MiB 的原子事务；Lease ID 始终以字符串跨 IPC 传输。
-- ZooKeeper：version 条件写、one-shot watch 自动续订、ACL aversion 条件编辑与 ADMIN 防误锁，以及持久/持久顺序/临时/临时顺序节点；临时节点由桌面连接 session 持有。
-- Nacos：2.x/3.x 配置、MD5 条件更新、SDK listener 加权威 MD5 对账、服务端配置历史，以及 namespace/service/instance 管理。持久实例走版本化管理 API；临时实例由当前桌面连接持有 Naming SDK session、维持心跳，并支持注册、更新和注销。
-- 安全边界：导出默认不含 value，导入 value 只进入 10 分钟一次性 Rust 计划；监听事件、历史列表、审计、错误和管理操作目标均不携带正文、密码或 token；诊断包只导出运行环境、adapter 能力和连接聚合计数，不含连接名、endpoint、namespace 或凭据。
-- 应用更新：标题栏可手动检查 GitHub Release；更新包由 Rust 下载、使用内置公钥验签、安装并重启，私钥只存在于发布环境。
-- 验证与发布：六版本真实服务矩阵，10 万 ZooKeeper 子节点分页证据，以及 macOS/Windows/Linux 安装包构建和安装验证门禁。
+- ZooKeeper SASL 尚未支持。
+- 单个 value 的内联读取和变更上限为 1 MiB。
+- 发布包的系统信任状态取决于对应平台的代码签名配置；公开发布前应查看 Release 说明。
 
-adapter 只统一连接与资源操作外形；etcd lease/transaction、ZooKeeper ACL/ephemeral、Nacos namespace/service/instance 保留各自语义。ZooKeeper SASL 仍是预留扩展点，不在当前支持范围。
+## License
 
-完整产品范围与验收口径见 [docs/PRODUCT_REQUIREMENTS.md](docs/PRODUCT_REQUIREMENTS.md)。
-本地真实服务验证方法见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
-已完成的验证记录见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+[MIT](LICENSE)

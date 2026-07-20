@@ -1,4 +1,5 @@
 pub mod audit;
+mod audited_mutation;
 pub mod connections;
 pub mod credentials;
 pub mod diagnostics;
@@ -8,8 +9,8 @@ pub mod updates;
 
 use registry::{
     AdapterDescriptor, AdapterId, ConnectionProbe, ConnectionProfile, ConnectionSession,
-    EtcdLeaseAction, EtcdLeaseActionResult, EtcdTransaction, EtcdTransactionResult, MutationPhase,
-    MutationResult, NacosInstance, NacosNamespace, NacosNativeAction, NacosNativeActionResult,
+    EtcdLeaseAction, EtcdLeaseActionResult, EtcdTransaction, EtcdTransactionResult, MutationResult,
+    NacosInstance, NacosNamespace, NacosNativeAction, NacosNativeActionResult,
     NacosNativeOperation, NacosService, NacosServicePage, NativeResourceInfo, OperationId,
     RegistryCatalog, RegistryError, RegistryService, ResourceAddress, ResourceDocument,
     ResourceHistoryDocument, ResourceHistoryPage, ResourceHistoryRequest, ResourceMutation,
@@ -386,12 +387,14 @@ async fn execute_audited_etcd_transaction(
             "etcd transactions require an etcd connection",
         ));
     }
-    let registered_operation_id = OperationId::new(operation_id.to_owned())?;
-    let phase = MutationPhase::default();
-    let workflow_phase = phase.clone();
     let workflow_service = service.clone();
-    let result = service
-        .run_mutation_workflow(registered_operation_id, phase, async {
+    audited_mutation::run(
+        directory,
+        service,
+        audit,
+        connection_id,
+        operation_id,
+        |workflow_phase| async move {
             for mutation in &transaction.mutations {
                 let previous = match mutation.expected_version() {
                     Some(expected_version) => {
@@ -439,23 +442,9 @@ async fn execute_audited_etcd_transaction(
                     })?;
             }
             Ok(result)
-        })
-        .await;
-    match result {
-        Ok(result) => Ok(result),
-        Err(error) => {
-            if error.code == registry::RegistryErrorCode::OutcomeUnknown {
-                let _ = audit
-                    .record_outcome_unknown_in(directory, connection_id, operation_id)
-                    .await;
-            } else if error.code != registry::RegistryErrorCode::AuditIncomplete {
-                let _ = audit
-                    .record_failed_in(directory, connection_id, operation_id, error.code)
-                    .await;
-            }
-            Err(error)
-        }
-    }
+        },
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -505,7 +494,6 @@ async fn execute_audited_etcd_lease_action(
             "etcd lease actions require an etcd connection",
         ));
     }
-    let registered_operation_id = OperationId::new(operation_id.to_owned())?;
     let operation = match &action {
         EtcdLeaseAction::GrantAndAttach { .. } => {
             audit::NativeAuditOperation::EtcdLeaseGrantAndAttach
@@ -522,13 +510,16 @@ async fn execute_audited_etcd_lease_action(
         | EtcdLeaseAction::Revoke { lease_id, .. } => format!("lease:{lease_id}"),
         EtcdLeaseAction::Detach { .. } => "lease:detach".to_owned(),
     };
-    let phase = MutationPhase::default();
-    let workflow_phase = phase.clone();
     let workflow_service = service.clone();
     let address = action.address().clone();
     let expected_version = action.expected_version().map(str::to_owned);
-    let result = service
-        .run_mutation_workflow(registered_operation_id, phase, async {
+    audited_mutation::run(
+        directory,
+        service,
+        audit,
+        connection_id,
+        operation_id,
+        |workflow_phase| async move {
             let document = workflow_service
                 .read(connection_id, address.clone())
                 .await?;
@@ -608,23 +599,9 @@ async fn execute_audited_etcd_lease_action(
                     ))
                 })?;
             Ok(result)
-        })
-        .await;
-    match result {
-        Ok(result) => Ok(result),
-        Err(error) => {
-            if error.code == registry::RegistryErrorCode::OutcomeUnknown {
-                let _ = audit
-                    .record_outcome_unknown_in(directory, connection_id, operation_id)
-                    .await;
-            } else if error.code != registry::RegistryErrorCode::AuditIncomplete {
-                let _ = audit
-                    .record_failed_in(directory, connection_id, operation_id, error.code)
-                    .await;
-            }
-            Err(error)
-        }
-    }
+        },
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -674,7 +651,6 @@ async fn execute_audited_zookeeper_native_action(
             "ZooKeeper native actions require a ZooKeeper connection",
         ));
     }
-    let registered_operation_id = OperationId::new(operation_id.to_owned())?;
     let (operation, expected_version, target) = match &action {
         ZookeeperNativeAction::SetAcl {
             expected_acl_version,
@@ -701,11 +677,14 @@ async fn execute_audited_zookeeper_native_action(
         }
     };
     let address = action.address().clone();
-    let phase = MutationPhase::default();
-    let workflow_phase = phase.clone();
     let workflow_service = service.clone();
-    let result = service
-        .run_mutation_workflow(registered_operation_id, phase, async {
+    audited_mutation::run(
+        directory,
+        service,
+        audit,
+        connection_id,
+        operation_id,
+        |workflow_phase| async move {
             let previous = match &action {
                 ZookeeperNativeAction::SetAcl { .. } => {
                     let NativeResourceInfo::ZookeeperAcl {
@@ -794,23 +773,9 @@ async fn execute_audited_zookeeper_native_action(
                     ))
                 })?;
             Ok(result)
-        })
-        .await;
-    match result {
-        Ok(result) => Ok(result),
-        Err(error) => {
-            if error.code == registry::RegistryErrorCode::OutcomeUnknown {
-                let _ = audit
-                    .record_outcome_unknown_in(directory, connection_id, operation_id)
-                    .await;
-            } else if error.code != registry::RegistryErrorCode::AuditIncomplete {
-                let _ = audit
-                    .record_failed_in(directory, connection_id, operation_id, error.code)
-                    .await;
-            }
-            Err(error)
-        }
-    }
+        },
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1011,13 +976,15 @@ async fn execute_audited_nacos_native_action(
         }
     };
     let expected_fingerprint = action.expected_fingerprint().map(str::to_owned);
-    let registered_operation_id = OperationId::new(operation_id.to_owned())?;
-    let phase = MutationPhase::default();
-    let workflow_phase = phase.clone();
     let workflow_service = service.clone();
     let audit_action = action.clone();
-    let result = service
-        .run_mutation_workflow(registered_operation_id, phase, async {
+    audited_mutation::run(
+        directory,
+        service,
+        audit,
+        connection_id,
+        operation_id,
+        |workflow_phase| async move {
             let previous = nacos_native_snapshot(
                 &workflow_service,
                 connection_id,
@@ -1078,23 +1045,9 @@ async fn execute_audited_nacos_native_action(
                     ))
                 })?;
             Ok(result)
-        })
-        .await;
-    match result {
-        Ok(result) => Ok(result),
-        Err(error) => {
-            if error.code == registry::RegistryErrorCode::OutcomeUnknown {
-                let _ = audit
-                    .record_outcome_unknown_in(directory, connection_id, operation_id)
-                    .await;
-            } else if error.code != registry::RegistryErrorCode::AuditIncomplete {
-                let _ = audit
-                    .record_failed_in(directory, connection_id, operation_id, error.code)
-                    .await;
-            }
-            Err(error)
-        }
-    }
+        },
+    )
+    .await
 }
 
 fn native_state_snapshot<T: Serialize>(
@@ -1202,12 +1155,14 @@ async fn execute_audited_mutation(
     mutation: ResourceMutation,
 ) -> Result<MutationResult, RegistryError> {
     mutation.validate()?;
-    let registered_operation_id = OperationId::new(operation_id.to_owned())?;
-    let phase = MutationPhase::default();
-    let workflow_phase = phase.clone();
     let workflow_service = service.clone();
-    let result = service
-        .run_mutation_workflow(registered_operation_id, phase, async {
+    audited_mutation::run(
+        directory,
+        service,
+        audit,
+        connection_id,
+        operation_id,
+        |workflow_phase| async move {
             let previous = match mutation.expected_version() {
                 Some(expected_version) => {
                     let document = workflow_service
@@ -1247,23 +1202,9 @@ async fn execute_audited_mutation(
                     ))
                 })?;
             Ok(result)
-        })
-        .await;
-    match result {
-        Ok(result) => Ok(result),
-        Err(error) => {
-            if error.code == registry::RegistryErrorCode::OutcomeUnknown {
-                let _ = audit
-                    .record_outcome_unknown_in(directory, connection_id, operation_id)
-                    .await;
-            } else if error.code != registry::RegistryErrorCode::AuditIncomplete {
-                let _ = audit
-                    .record_failed_in(directory, connection_id, operation_id, error.code)
-                    .await;
-            }
-            Err(error)
-        }
-    }
+        },
+    )
+    .await
 }
 
 #[derive(Deserialize)]

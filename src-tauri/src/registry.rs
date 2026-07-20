@@ -22,6 +22,8 @@ use crate::credentials::ConnectionSecret;
 use adapters::RegistrySession;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum AdapterId {
     Etcd,
@@ -65,6 +67,8 @@ pub struct AdapterDescriptor {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum NacosApiVersion {
     #[default]
@@ -133,6 +137,8 @@ pub enum NacosNativeOperation {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(
     tag = "action",
     rename_all = "camelCase",
@@ -495,6 +501,8 @@ fn validate_nacos_metadata(metadata: &BTreeMap<String, String>) -> Result<(), Re
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionEnvironment {
     #[default]
@@ -506,6 +514,8 @@ pub enum ConnectionEnvironment {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "camelCase")]
 pub enum AuthenticationMode {
     #[default]
@@ -516,6 +526,8 @@ pub enum AuthenticationMode {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionAuth {
     #[serde(default)]
@@ -527,6 +539,8 @@ pub struct ConnectionAuth {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct TlsProfile {
     #[serde(default)]
@@ -542,6 +556,8 @@ pub struct TlsProfile {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionProfile {
     pub id: String,
@@ -646,6 +662,8 @@ pub struct ConnectionProbe {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -1219,6 +1237,8 @@ fn is_canonical_zookeeper_path(path: &str) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "camelCase")]
 pub enum WatchStatusState {
     Starting,
@@ -1231,6 +1251,8 @@ pub enum WatchStatusState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "camelCase")]
 pub enum WatchChangeKind {
     Created,
@@ -1240,6 +1262,8 @@ pub enum WatchChangeKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -1698,6 +1722,8 @@ impl ResourceDocument {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "camelCase")]
 pub enum RegistryErrorCode {
     Validation,
@@ -1721,6 +1747,8 @@ pub enum RegistryErrorCode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct RegistryError {
     pub code: RegistryErrorCode,
