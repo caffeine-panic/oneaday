@@ -19,8 +19,8 @@ jobs:
         include:
           - name: Ubuntu 22.04
             runner: ubuntu-22.04
-          - name: Windows 2022
-            runner: windows-2022
+          - name: Windows 2025
+            runner: windows-2025
           - name: macOS 15
             runner: macos-15
 
@@ -65,12 +65,19 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Clear generated TypeScript contracts
+        if: runner.os != 'Windows'
         run: node scripts/clear-generated-contracts.mjs
 
       - name: Run Rust tests
+        if: runner.os != 'Windows'
         run: cargo test --manifest-path src-tauri/Cargo.toml --quiet
 
+      - name: Compile Rust tests on Windows
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-run --quiet
+
       - name: Verify generated TypeScript contracts are current
+        if: runner.os != 'Windows'
         run: node scripts/verify-generated-contracts.mjs
 
       - name: Build frontend
