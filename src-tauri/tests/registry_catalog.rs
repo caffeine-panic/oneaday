@@ -245,6 +245,38 @@ fn authenticated_probe_requires_a_secret_before_using_a_protocol_client() {
 }
 
 #[test]
+fn mse_access_key_probe_requires_an_access_key_id_before_using_nacos() {
+    let error = tauri::async_runtime::block_on(
+        RegistryService::default().probe_with_credentials_cancellable(
+            OperationId::new("missing-mse-access-key-id".to_owned())
+                .expect("operation id should be valid"),
+            ConnectionProfile {
+                id: "secured-mse".to_owned(),
+                name: "Secured MSE".to_owned(),
+                adapter: AdapterId::Nacos,
+                endpoint: "mse.example:8848".to_owned(),
+                namespace: String::new(),
+                nacos_api_version: NacosApiVersion::V2,
+                environment: Default::default(),
+                auth: ConnectionAuth {
+                    mode: AuthenticationMode::MseAccessKey,
+                    username: "   ".to_owned(),
+                    custom_key: String::new(),
+                },
+                tls: Default::default(),
+            },
+            Some(atlas_registry_lib::credentials::ConnectionSecret::new(
+                "secret-key",
+            )),
+        ),
+    )
+    .expect_err("MSE AccessKey authentication requires an AccessKey ID");
+
+    assert_eq!(error.code, RegistryErrorCode::Validation);
+    assert_eq!(error.message, "MSE authentication requires an AccessKey ID");
+}
+
+#[test]
 fn legacy_connection_profiles_gain_safe_authentication_and_tls_defaults() {
     let profile = serde_json::from_value::<ConnectionProfile>(serde_json::json!({
         "id": "legacy-etcd",

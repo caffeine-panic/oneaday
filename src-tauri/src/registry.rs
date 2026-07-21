@@ -523,6 +523,7 @@ pub enum AuthenticationMode {
     UsernamePassword,
     Digest,
     Custom,
+    MseAccessKey,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -612,6 +613,13 @@ impl ConnectionProfile {
                 if self.auth.custom_key.is_empty() {
                     return Err(RegistryError::validation(
                         "custom Nacos authentication requires a context key",
+                    ));
+                }
+            }
+            (AdapterId::Nacos, AuthenticationMode::MseAccessKey) => {
+                if self.auth.username.is_empty() {
+                    return Err(RegistryError::validation(
+                        "MSE authentication requires an AccessKey ID",
                     ));
                 }
             }

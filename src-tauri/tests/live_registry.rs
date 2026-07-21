@@ -35,22 +35,38 @@ fn secured_profile(
         AdapterId::Zookeeper => "ATLAS_TEST_ZOOKEEPER",
         AdapterId::Nacos => "ATLAS_TEST_NACOS",
     };
+    let mse_access_key_id = (adapter == AdapterId::Nacos)
+        .then(|| std::env::var("ATLAS_TEST_NACOS_ACCESS_KEY_ID").ok())
+        .flatten();
     let username = std::env::var(format!("{prefix}_USERNAME")).ok();
-    let secret = username.map(|username| {
+    let secret = if let Some(access_key_id) = mse_access_key_id {
         profile.auth = ConnectionAuth {
-            mode: if adapter == AdapterId::Zookeeper {
-                AuthenticationMode::Digest
-            } else {
-                AuthenticationMode::UsernamePassword
-            },
-            username,
+            mode: AuthenticationMode::MseAccessKey,
+            username: access_key_id,
             custom_key: String::new(),
         };
-        ConnectionSecret::new(
-            std::env::var(format!("{prefix}_PASSWORD"))
-                .unwrap_or_else(|_| panic!("set {prefix}_PASSWORD with {prefix}_USERNAME")),
-        )
-    });
+        Some(ConnectionSecret::new(
+            std::env::var("ATLAS_TEST_NACOS_ACCESS_KEY_SECRET").expect(
+                "set ATLAS_TEST_NACOS_ACCESS_KEY_SECRET with ATLAS_TEST_NACOS_ACCESS_KEY_ID",
+            ),
+        ))
+    } else {
+        username.map(|username| {
+            profile.auth = ConnectionAuth {
+                mode: if adapter == AdapterId::Zookeeper {
+                    AuthenticationMode::Digest
+                } else {
+                    AuthenticationMode::UsernamePassword
+                },
+                username,
+                custom_key: String::new(),
+            };
+            ConnectionSecret::new(
+                std::env::var(format!("{prefix}_PASSWORD"))
+                    .unwrap_or_else(|_| panic!("set {prefix}_PASSWORD with {prefix}_USERNAME")),
+            )
+        })
+    };
     if std::env::var(format!("{prefix}_TLS")).as_deref() == Ok("1") {
         profile.tls = TlsProfile {
             enabled: true,

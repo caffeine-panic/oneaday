@@ -1,4 +1,10 @@
 import { connectionEnvironmentLabels } from "./registry";
+import {
+  authLabels,
+  authModes,
+  credentialIdentityLabel,
+  credentialSecretLabel,
+} from "./connectionAuth";
 import type {
   AdapterId,
   AuthenticationMode,
@@ -34,19 +40,6 @@ const endpointPlaceholders: Record<AdapterId, string> = {
   zookeeper: "127.0.0.1:2181 或 zk-1:2181,zk-2:2181/app",
   nacos: "127.0.0.1:8848",
 };
-
-const authLabels: Record<AuthenticationMode, string> = {
-  none: "无认证",
-  usernamePassword: "用户名 / 密码",
-  digest: "Digest",
-  custom: "自定义上下文",
-};
-
-function authModes(adapter: AdapterId): AuthenticationMode[] {
-  if (adapter === "zookeeper") return ["none", "digest"];
-  if (adapter === "nacos") return ["none", "usernamePassword", "custom"];
-  return ["none", "usernamePassword"];
-}
 
 export function ConnectionDialog({
   mode,
@@ -221,7 +214,7 @@ export function ConnectionDialog({
           {authenticated && form.auth.mode !== "custom" && (
             <div className="form-grid equal">
               <label>
-                用户名
+                {credentialIdentityLabel(form.auth.mode)}
                 <input
                   value={form.auth.username}
                   onChange={(event) =>
@@ -234,14 +227,18 @@ export function ConnectionDialog({
                 />
               </label>
               <label>
-                {form.auth.mode === "digest" ? "Digest 密码" : "密码"}
+                {credentialSecretLabel(form.auth.mode)}
                 <input
                   type="password"
                   value={secret}
                   onChange={(event) => onSecretChange(event.target.value)}
                   autoComplete="new-password"
                   placeholder={
-                    mode === "edit" ? "留空表示保留原密码" : "保存在系统凭据库"
+                    mode === "edit"
+                      ? form.auth.mode === "mseAccessKey"
+                        ? "留空表示保留原 AccessKey Secret"
+                        : "留空表示保留原密码"
+                      : "保存在系统凭据库"
                   }
                 />
               </label>

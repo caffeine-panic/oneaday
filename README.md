@@ -44,7 +44,7 @@ Atlas Registry 支持：
 
 - etcd 用户名/密码与 TLS
 - ZooKeeper Digest 认证与 TLS
-- Nacos 用户名/密码或自定义认证上下文
+- Nacos 用户名/密码、自定义认证上下文或阿里云 MSE AccessKey（AK/SK）
 
 连接配置保存在本机应用目录，密钥保存在系统凭据库。临时密钥只用于当前连接，不写入连接配置。
 

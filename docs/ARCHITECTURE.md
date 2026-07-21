@@ -64,12 +64,12 @@ flowchart LR
 
 [registry.rs](../src-tauri/src/registry.rs) 定义 `RegistryCatalog`（adapter descriptor 与能力声明）、`RegistryService`（会话表、操作取消、监听注册）以及全部 DTO 与校验。`registry/` 子模块按职责拆分：
 
-| 模块                                 | 职责                                                      |
-| ------------------------------------ | --------------------------------------------------------- |
-| `registry/adapters.rs` + `adapters/` | 三协议客户端封装成统一的 `RegistrySession`，含 Nacos 鉴权 |
-| `registry/mutations.rs`              | 条件变更执行与前后快照                                    |
-| `registry/watch.rs`                  | 监听生命周期、断线恢复、Nacos 5 秒 MD5 对账               |
-| `registry/nacos_native.rs`           | namespace / service / instance 管理与有界回读确认         |
+| 模块                                 | 职责                                                                                      |
+| ------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `registry/adapters.rs` + `adapters/` | 三协议客户端封装成统一的 `RegistrySession`，含 Nacos 用户密码、MSE AccessKey 与自定义鉴权 |
+| `registry/mutations.rs`              | 条件变更执行与前后快照                                                                    |
+| `registry/watch.rs`                  | 监听生命周期、断线恢复、Nacos 5 秒 MD5 对账                                               |
+| `registry/nacos_native.rs`           | namespace / service / instance 管理与有界回读确认                                         |
 
 `audited_mutation.rs` 把「写前审计 → 远端变更 → 写后审计」编排成一个不可跳过的流程；所有 mutation 命令都经过它。
 
@@ -82,7 +82,7 @@ flowchart LR
 | 边界         | 机制                                                                                                                                                                          |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | WebView 权限 | CSP 禁外联；capability 只授权 `main` 窗口调用应用命令（[tauri.conf.json](../src-tauri/tauri.conf.json)、[capabilities/default.json](../src-tauri/capabilities/default.json)） |
-| 凭据         | 密钥只进系统凭据库（`keyring`），连接配置文件不含 secret；临时凭据仅存活于当前连接，`zeroize` 擦除                                                                            |
+| 凭据         | 密码、token、MSE AccessKey Secret 只进系统凭据库（`keyring`），连接配置文件不含 secret；临时凭据仅存活于当前连接，`zeroize` 擦除                                              |
 | 审计         | `mutation-audit.jsonl` 记录版本 / 大小 / 编码 / SHA-256 摘要，不记录 value、密码、token；started 事件先于远端变更同步落盘                                                     |
 | 诊断包       | 只含运行时版本、adapter 能力、聚合连接计数；由 sentinel 测试（`diagnostics.rs`）禁止出现连接名 / endpoint / namespace / 凭据                                                  |
 | 更新         | 只访问 GitHub Releases 的 `latest.json`，minisign 签名验证不可关闭，下载安装全在 Rust 侧                                                                                      |
@@ -95,7 +95,8 @@ flowchart LR
 2. **条件变更**：etcd revision、ZooKeeper version/aversion、Nacos MD5 / SHA-256 指纹；Nacos 管理 API 无 CAS，采用「读时指纹比较 + 写后有界回读确认（≤ 20 次 × 200 ms）」并在 UI 明示竞争窗口。
 3. **结果不确定性诚实上报**：取消 / 超时 / 提交后传输错误 → `mutationOutcomeUnknown`，不自动重试；远端成功但审计落盘失败 → `auditIncomplete`，两者不得混淆。
 4. **Nacos SDK cache 不可信**：配置正文读取、写前检查、写后确认、周期对账一律走版本对应的权威 HTTP API；SDK 只承担 gRPC mutation、listener 与临时实例 session（原因见 ADR-0001 上游约束）。
-5. **取消安全**：长操作挂在 `CancellationToken` 上；审计追加在独立任务中 `write_all + sync_data`，不被取消切断。
+5. **MSE 签名路径一致**：SDK Config/Naming 身份上下文与权威 HTTP API 共享 AccessKey 生命周期和 HMAC-SHA1 规则；AK Secret 不进入 URL、连接配置或日志。
+6. **取消安全**：长操作挂在 `CancellationToken` 上；审计追加在独立任务中 `write_all + sync_data`，不被取消切断。
 
 ## 测试体系
 
