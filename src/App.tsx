@@ -23,7 +23,10 @@ import {
   NewResourceDialog,
   type NewResourceDraft,
 } from "./MutationDialogs";
-import { ConnectionDialog, type ConnectionDialogMode } from "./ConnectionDialog";
+import {
+  ConnectionDialog,
+  type ConnectionDialogMode,
+} from "./ConnectionDialog";
 import { HistoryDialog } from "./HistoryDialog";
 import { NacosHistoryDialog } from "./NacosHistoryDialog";
 import { NacosNativeDialog } from "./NacosNativeDialog";
@@ -203,10 +206,13 @@ function utf8Base64(value: string) {
   return btoa(binary);
 }
 
-function etcdAddressFromInput(rawInput: string): Extract<ResourceAddress, { type: "etcd" }> {
+function etcdAddressFromInput(
+  rawInput: string,
+): Extract<ResourceAddress, { type: "etcd" }> {
   const input = rawInput.trim();
   if (!input) throw new Error("etcd transaction key 不能为空");
-  if (!input.startsWith("base64:")) return { type: "etcd", keyBase64: utf8Base64(input) };
+  if (!input.startsWith("base64:"))
+    return { type: "etcd", keyBase64: utf8Base64(input) };
   const keyBase64 = input.slice("base64:".length).trim();
   try {
     if (!keyBase64 || atob(keyBase64).length === 0) throw new Error();
@@ -220,7 +226,8 @@ function locateAddress(adapter: AdapterId, rawInput: string): ResourceAddress {
   const input = rawInput.trim();
   if (!input) throw new Error("请输入要定位的资源标识");
   if (adapter === "etcd") {
-    if (!input.startsWith("base64:")) return { type: "etcd", keyBase64: utf8Base64(input) };
+    if (!input.startsWith("base64:"))
+      return { type: "etcd", keyBase64: utf8Base64(input) };
     const keyBase64 = input.slice("base64:".length).trim();
     try {
       atob(keyBase64);
@@ -231,7 +238,11 @@ function locateAddress(adapter: AdapterId, rawInput: string): ResourceAddress {
     return { type: "etcd", keyBase64 };
   }
   if (adapter === "zookeeper") {
-    if (!input.startsWith("/") || input.includes("//") || (input.length > 1 && input.endsWith("/"))) {
+    if (
+      !input.startsWith("/") ||
+      input.includes("//") ||
+      (input.length > 1 && input.endsWith("/"))
+    ) {
       throw new Error("ZooKeeper 路径必须是规范的绝对路径");
     }
     return { type: "zookeeper", path: input };
@@ -244,16 +255,22 @@ function locateAddress(adapter: AdapterId, rawInput: string): ResourceAddress {
   return { type: "nacosConfig", group, dataId };
 }
 
-function searchScope(adapter: AdapterId, selected?: ResourceAddress): ResourceAddress {
+function searchScope(
+  adapter: AdapterId,
+  selected?: ResourceAddress,
+): ResourceAddress {
   if (adapter === "etcd" && selected?.type === "etcdPrefix") return selected;
-  if (adapter === "zookeeper" && selected?.type === "zookeeper") return selected;
+  if (adapter === "zookeeper" && selected?.type === "zookeeper")
+    return selected;
   return ROOT_ADDRESS;
 }
 
 export function App() {
   const [capabilities, setCapabilities] = useState<AdapterDescriptor[]>();
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
-  const [sessions, setSessions] = useState<Record<string, ConnectionSession>>({});
+  const [sessions, setSessions] = useState<Record<string, ConnectionSession>>(
+    {},
+  );
   const [selectedId, setSelectedId] = useState<string>();
   const {
     state: {
@@ -281,16 +298,17 @@ export function App() {
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress>();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [updateProxySettings, setUpdateProxySettings] = useState<UpdateProxySettings>(
-    loadUpdateProxySettings,
-  );
+  const [updateProxySettings, setUpdateProxySettings] =
+    useState<UpdateProxySettings>(loadUpdateProxySettings);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<ConnectionDialogMode>("new");
   const [testingConnection, setTestingConnection] = useState(false);
   const [form, setForm] = useState<ConnectionProfile>(emptyForm);
   const [connectionSecret, setConnectionSecret] = useState("");
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
-  const [resourceDraft, setResourceDraft] = useState<NewResourceDraft>(() => emptyResourceDraft("etcd"));
+  const [resourceDraft, setResourceDraft] = useState<NewResourceDraft>(() =>
+    emptyResourceDraft("etcd"),
+  );
   const [pendingMutation, setPendingMutation] = useState<ResourceMutation>();
   const [confirmationText, setConfirmationText] = useState("");
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
@@ -303,18 +321,26 @@ export function App() {
   const [historyCursor, setHistoryCursor] = useState<string>();
   const [historyLoading, setHistoryLoading] = useState(false);
   const [serverHistoryOpen, setServerHistoryOpen] = useState(false);
-  const [serverHistoryAddress, setServerHistoryAddress] = useState<ResourceAddress>();
-  const [serverHistoryItems, setServerHistoryItems] = useState<ResourceHistoryEntry[]>([]);
+  const [serverHistoryAddress, setServerHistoryAddress] =
+    useState<ResourceAddress>();
+  const [serverHistoryItems, setServerHistoryItems] = useState<
+    ResourceHistoryEntry[]
+  >([]);
   const [serverHistoryCursor, setServerHistoryCursor] = useState<string>();
-  const [serverHistoryDetail, setServerHistoryDetail] = useState<ResourceHistoryDocument>();
+  const [serverHistoryDetail, setServerHistoryDetail] =
+    useState<ResourceHistoryDocument>();
   const [serverHistoryLoading, setServerHistoryLoading] = useState(false);
   const [nativeInfoOpen, setNativeInfoOpen] = useState(false);
   const [nativeInfo, setNativeInfo] = useState<NativeResourceInfo>();
   const [nativeInfoLoading, setNativeInfoLoading] = useState(false);
   const [etcdTransactionOpen, setEtcdTransactionOpen] = useState(false);
-  const [etcdTransactionItems, setEtcdTransactionItems] = useState<EtcdTransactionDraftItem[]>([]);
-  const [etcdTransactionConfirmation, setEtcdTransactionConfirmation] = useState("");
-  const [pendingZookeeperAction, setPendingZookeeperAction] = useState<Extract<ZookeeperNativeAction, { action: "create" }>>();
+  const [etcdTransactionItems, setEtcdTransactionItems] = useState<
+    EtcdTransactionDraftItem[]
+  >([]);
+  const [etcdTransactionConfirmation, setEtcdTransactionConfirmation] =
+    useState("");
+  const [pendingZookeeperAction, setPendingZookeeperAction] =
+    useState<Extract<ZookeeperNativeAction, { action: "create" }>>();
   const [zookeeperConfirmation, setZookeeperConfirmation] = useState("");
   const [nacosNativeOpen, setNacosNativeOpen] = useState(false);
   const [resourceWatch, setResourceWatch] = useState<ResourceWatchView>();
@@ -339,17 +365,22 @@ export function App() {
       .catch((reason: unknown) => setMessage(errorMessage(reason)));
   }, []);
 
-  useEffect(() => () => {
-    watchGeneration.current += 1;
-    const active = watchHandle.current;
-    if (active) void stopWatch(active.subscriptionId);
-  }, []);
+  useEffect(
+    () => () => {
+      watchGeneration.current += 1;
+      const active = watchHandle.current;
+      if (active) void stopWatch(active.subscriptionId);
+    },
+    [],
+  );
 
   const visibleRows = useMemo(() => {
     const query = filter.trim().toLocaleLowerCase();
     if (!query) return rows;
     return rows.filter(
-      (row) => row.kind === "resource" && row.node.name.toLocaleLowerCase().includes(query),
+      (row) =>
+        row.kind === "resource" &&
+        row.node.name.toLocaleLowerCase().includes(query),
     );
   }, [filter, rows]);
 
@@ -442,7 +473,13 @@ export function App() {
   ) => {
     const operationId = startOperation();
     try {
-      return await searchResources(connectionId, scope, query, operationId, cursor);
+      return await searchResources(
+        connectionId,
+        scope,
+        query,
+        operationId,
+        cursor,
+      );
     } finally {
       finishOperation(operationId);
     }
@@ -467,7 +504,8 @@ export function App() {
 
   const handleWatchEvent = (event: WatchEvent) => {
     setResourceWatch((current) => {
-      if (!current || current.subscriptionId !== event.subscriptionId) return current;
+      if (!current || current.subscriptionId !== event.subscriptionId)
+        return current;
       if (event.kind === "status") {
         if (event.state === "stopped" || event.state === "failed") {
           if (watchHandle.current?.subscriptionId === event.subscriptionId) {
@@ -479,7 +517,8 @@ export function App() {
           state: event.state,
           message: event.message ?? undefined,
           retryInMs: event.retryInMs ?? undefined,
-          remoteChanged: event.state === "compacted" ? true : current.remoteChanged,
+          remoteChanged:
+            event.state === "compacted" ? true : current.remoteChanged,
         };
       }
       return {
@@ -521,31 +560,46 @@ export function App() {
       watchHandle.current = handle;
     } catch (reason) {
       if (watchGeneration.current !== generation) return;
-      setResourceWatch((current) => current?.subscriptionId === subscriptionId
-        ? { ...current, state: "failed", message: errorMessage(reason) }
-        : current);
+      setResourceWatch((current) =>
+        current?.subscriptionId === subscriptionId
+          ? { ...current, state: "failed", message: errorMessage(reason) }
+          : current,
+      );
       setMessage(errorMessage(reason));
     }
   };
 
   const stopResourceWatch = async () => {
     await stopActiveWatch(false);
-    setResourceWatch((current) => current
-      ? { ...current, state: "stopped", message: undefined, retryInMs: undefined }
-      : current);
+    setResourceWatch((current) =>
+      current
+        ? {
+            ...current,
+            state: "stopped",
+            message: undefined,
+            retryInMs: undefined,
+          }
+        : current,
+    );
   };
 
   const refreshWatchedResource = async () => {
     if (!selectedSession || !document || busy) return;
-    if (draftValue !== document.value.content
-      && !globalThis.confirm("远端资源已变化。刷新会丢弃当前未保存的编辑，是否继续？")) {
+    if (
+      draftValue !== document.value.content &&
+      !globalThis.confirm(
+        "远端资源已变化。刷新会丢弃当前未保存的编辑，是否继续？",
+      )
+    ) {
       return;
     }
     setBusy(true);
     setMessage(undefined);
     try {
       showDocument(await runRead(selectedSession.id, document.address));
-      setResourceWatch((current) => current ? { ...current, remoteChanged: false } : current);
+      setResourceWatch((current) =>
+        current ? { ...current, remoteChanged: false } : current,
+      );
       setMessage("已读取远端最新版本");
     } catch (reason) {
       if (isNotFound(reason)) {
@@ -580,7 +634,10 @@ export function App() {
     }
   };
 
-  const connectAndLoad = async (profile: ConnectionProfile, transientSecret?: string) => {
+  const connectAndLoad = async (
+    profile: ConnectionProfile,
+    transientSecret?: string,
+  ) => {
     await stopActiveWatch();
     await operations.cancel("serverHistory").catch(() => false);
     setNativeInfoOpen(false);
@@ -615,17 +672,25 @@ export function App() {
       setMessage("连接名称和 endpoint 不能为空");
       return;
     }
-    if (candidate.auth.mode !== "none" && dialogMode !== "edit" && !connectionSecret) {
+    if (
+      candidate.auth.mode !== "none" &&
+      dialogMode !== "edit" &&
+      !connectionSecret
+    ) {
       setMessage("新连接启用认证时必须填写密钥");
       return;
     }
     try {
-      const credentialUpdate = candidate.auth.mode === "none"
-        ? { operation: "clear" as const }
-        : connectionSecret
-          ? { operation: "replace" as const, secret: connectionSecret }
-          : { operation: "preserve" as const };
-      const nextProfiles = await upsertConnectionProfile(candidate, credentialUpdate);
+      const credentialUpdate =
+        candidate.auth.mode === "none"
+          ? { operation: "clear" as const }
+          : connectionSecret
+            ? { operation: "replace" as const, secret: connectionSecret }
+            : { operation: "preserve" as const };
+      const nextProfiles = await upsertConnectionProfile(
+        candidate,
+        credentialUpdate,
+      );
       setProfiles(nextProfiles);
       setDialogOpen(false);
       await connectAndLoad(candidate, connectionSecret || undefined);
@@ -646,7 +711,11 @@ export function App() {
     setMessage(undefined);
     const operationId = startOperation();
     try {
-      const result = await probeConnection(candidate, operationId, connectionSecret || undefined);
+      const result = await probeConnection(
+        candidate,
+        operationId,
+        connectionSecret || undefined,
+      );
       setMessage(`连接测试成功：${result.endpoint}`);
     } catch (reason) {
       setMessage(isCancelled(reason) ? "连接测试已取消" : errorMessage(reason));
@@ -659,7 +728,11 @@ export function App() {
 
   const selectProfile = async (profile: ConnectionProfile) => {
     const session = sessions[profile.id];
-    const selectionPlan = planProfileSelection(selectedId, profile.id, Boolean(session));
+    const selectionPlan = planProfileSelection(
+      selectedId,
+      profile.id,
+      Boolean(session),
+    );
     if (selectionPlan === "preserve") return;
 
     await stopActiveWatch();
@@ -711,7 +784,12 @@ export function App() {
     try {
       const page = await runSearch(selectedSession.id, scope, query);
       setRows(searchPageRows(page.items, page.scope, query, page.nextCursor));
-      setActiveSearch({ scope: page.scope, query, scanned: page.scanned, exhaustive: page.exhaustive });
+      setActiveSearch({
+        scope: page.scope,
+        query,
+        scanned: page.scanned,
+        exhaustive: page.exhaustive,
+      });
       setFilter("");
       setMessage(
         `${page.items.length} 个匹配项 · 本次检查 ${page.scanned} 个标识${page.exhaustive ? " · 已到当前范围末尾" : " · 可继续加载"}`,
@@ -732,11 +810,15 @@ export function App() {
       setMessage(errorMessage(reason));
       return;
     }
-    if (document && draftValue !== document.value.content
-      && !globalThis.confirm("定位其他资源会丢弃当前未保存的编辑，是否继续？")) {
+    if (
+      document &&
+      draftValue !== document.value.content &&
+      !globalThis.confirm("定位其他资源会丢弃当前未保存的编辑，是否继续？")
+    ) {
       return;
     }
-    if (!document || !sameAddress(document.address, address)) await stopActiveWatch();
+    if (!document || !sameAddress(document.address, address))
+      await stopActiveWatch();
     setBusy(true);
     setMessage(undefined);
     setSelectedAddress(address);
@@ -787,7 +869,9 @@ export function App() {
 
     if (row.node.hasChildren === false) return;
     if (row.expanded) {
-      setRows((current) => collapseResourceRow(current, index, row.node.address));
+      setRows((current) =>
+        collapseResourceRow(current, index, row.node.address),
+      );
       return;
     }
 
@@ -813,24 +897,39 @@ export function App() {
           row.search.query,
           row.cursor,
         );
-        setRows((current) => replaceContinuationRow(
-          current,
-          index,
-          searchPageRows(page.items, page.scope, row.search!.query, page.nextCursor),
-          row,
-        ));
-        setActiveSearch((current) => current
-          ? { ...current, scanned: current.scanned + page.scanned, exhaustive: page.exhaustive }
-          : current);
+        setRows((current) =>
+          replaceContinuationRow(
+            current,
+            index,
+            searchPageRows(
+              page.items,
+              page.scope,
+              row.search!.query,
+              page.nextCursor,
+            ),
+            row,
+          ),
+        );
+        setActiveSearch((current) =>
+          current
+            ? {
+                ...current,
+                scanned: current.scanned + page.scanned,
+                exhaustive: page.exhaustive,
+              }
+            : current,
+        );
         return;
       }
       const page = await runList(selectedSession.id, row.parent, row.cursor);
-      setRows((current) => replaceContinuationRow(
-        current,
-        index,
-        pageRows(page.items, row.depth, page.parent, page.nextCursor),
-        row,
-      ));
+      setRows((current) =>
+        replaceContinuationRow(
+          current,
+          index,
+          pageRows(page.items, row.depth, page.parent, page.nextCursor),
+          row,
+        ),
+      );
     } catch (reason) {
       setMessage(errorMessage(reason));
     } finally {
@@ -853,10 +952,18 @@ export function App() {
         setMessage("etcd key 不能为空");
         return;
       }
-      address = { type: "etcd", keyBase64: utf8Base64(resourceDraft.keyOrPath) };
+      address = {
+        type: "etcd",
+        keyBase64: utf8Base64(resourceDraft.keyOrPath),
+      };
     } else if (selectedProfile.adapter === "zookeeper") {
       const path = resourceDraft.keyOrPath.trim();
-      if (!path.startsWith("/") || path === "/" || path.endsWith("/") || path.includes("//")) {
+      if (
+        !path.startsWith("/") ||
+        path === "/" ||
+        path.endsWith("/") ||
+        path.includes("//")
+      ) {
         setMessage("ZooKeeper 路径必须是规范的绝对非根路径，且不能以 / 结尾");
         return;
       }
@@ -870,7 +977,10 @@ export function App() {
       }
       address = { type: "nacosConfig", group, dataId };
     }
-    if (selectedProfile.adapter === "zookeeper" && resourceDraft.zookeeperMode !== "persistent") {
+    if (
+      selectedProfile.adapter === "zookeeper" &&
+      resourceDraft.zookeeperMode !== "persistent"
+    ) {
       setPendingZookeeperAction({
         action: "create",
         address,
@@ -919,7 +1029,10 @@ export function App() {
     setConfirmationText("");
   };
 
-  const reconcileUnknownMutation = async (connectionId: string, address: ResourceAddress) => {
+  const reconcileUnknownMutation = async (
+    connectionId: string,
+    address: ResourceAddress,
+  ) => {
     try {
       await reloadRoot(connectionId);
       const remoteDocument = await runRead(connectionId, address);
@@ -947,16 +1060,28 @@ export function App() {
       const message = errorMessage(reason);
       const recovery = mutationFailureRecovery(reason);
       if (recovery === "unknownOutcome") {
-        const reconciled = await reconcileUnknownMutation(selectedSession.id, mutation.address);
+        const reconciled = await reconcileUnknownMutation(
+          selectedSession.id,
+          mutation.address,
+        );
         setPendingMutation(undefined);
-        setMessage(reconciled
-          ? `${message}；已重新读取远端状态`
-          : `${message}；自动回读失败，远端结果仍未知，请先恢复连接并刷新，勿直接重试`);
+        setMessage(
+          reconciled
+            ? `${message}；已重新读取远端状态`
+            : `${message}；自动回读失败，远端结果仍未知，请先恢复连接并刷新，勿直接重试`,
+        );
       } else {
         if (recovery === "conflict") {
-          const reconciled = await reconcileUnknownMutation(selectedSession.id, mutation.address);
+          const reconciled = await reconcileUnknownMutation(
+            selectedSession.id,
+            mutation.address,
+          );
           setPendingMutation(undefined);
-          setMessage(reconciled ? message : `${message}；自动刷新失败，请恢复连接后手动刷新`);
+          setMessage(
+            reconciled
+              ? message
+              : `${message}；自动刷新失败，请恢复连接后手动刷新`,
+          );
         } else {
           setMessage(message);
         }
@@ -976,7 +1101,9 @@ export function App() {
         const refreshed = await runRead(selectedSession.id, result.address);
         showDocument(refreshed);
         setSelectedAddress(result.address);
-        setResourceWatch((current) => current ? { ...current, remoteChanged: false } : current);
+        setResourceWatch((current) =>
+          current ? { ...current, remoteChanged: false } : current,
+        );
       }
       setMessage(
         result.consistency === "atomic"
@@ -1064,7 +1191,9 @@ export function App() {
           `已写入 ${result.applied.length} 项；“${result.failed.item.name}”失败：${result.failed.error.message}；另有 ${result.remaining} 项未执行${refreshSuffix}`,
         );
       } else {
-        setMessage(`导入完成：已写入 ${result.applied.length} 项，${preview.skipped} 项因不含 value 跳过；脱敏审计已记录${refreshSuffix}`);
+        setMessage(
+          `导入完成：已写入 ${result.applied.length} 项，${preview.skipped} 项因不含 value 跳过；脱敏审计已记录${refreshSuffix}`,
+        );
       }
     } catch (reason) {
       setImportPreview(undefined);
@@ -1075,17 +1204,27 @@ export function App() {
     }
   };
 
-  const loadHistory = async (scope: string, cursor?: string, append = false) => {
+  const loadHistory = async (
+    scope: string,
+    cursor?: string,
+    append = false,
+  ) => {
     const generation = historyGeneration.current + 1;
     historyGeneration.current = generation;
     setHistoryLoading(true);
     try {
-      const page = await loadAuditHistory(scope === "all" ? undefined : scope, cursor);
+      const page = await loadAuditHistory(
+        scope === "all" ? undefined : scope,
+        cursor,
+      );
       if (historyGeneration.current !== generation) return;
-      setHistoryItems((current) => append ? [...current, ...page.items] : page.items);
+      setHistoryItems((current) =>
+        append ? [...current, ...page.items] : page.items,
+      );
       setHistoryCursor(page.nextCursor);
     } catch (reason) {
-      if (historyGeneration.current === generation) setMessage(errorMessage(reason));
+      if (historyGeneration.current === generation)
+        setMessage(errorMessage(reason));
     } finally {
       if (historyGeneration.current === generation) setHistoryLoading(false);
     }
@@ -1105,7 +1244,9 @@ export function App() {
     try {
       const receipt = await exportDiagnosticBundle();
       if (receipt) {
-        setMessage(`诊断包 ${receipt.fileName} 已导出；仅包含 ${receipt.connectionCount} 个连接的聚合计数，不含 endpoint、名称、value 或凭据`);
+        setMessage(
+          `诊断包 ${receipt.fileName} 已导出；仅包含 ${receipt.connectionCount} 个连接的聚合计数，不含 endpoint、名称、value 或凭据`,
+        );
       }
     } catch (reason) {
       setMessage(errorMessage(reason));
@@ -1144,7 +1285,9 @@ export function App() {
         cursor,
       );
       if (!operations.isCurrent("serverHistory", operationId)) return;
-      setServerHistoryItems((current) => append ? [...current, ...page.items] : page.items);
+      setServerHistoryItems((current) =>
+        append ? [...current, ...page.items] : page.items,
+      );
       setServerHistoryCursor(page.nextCursor);
     } catch (reason) {
       if (operations.isCurrent("serverHistory", operationId)) {
@@ -1158,7 +1301,12 @@ export function App() {
   };
 
   const openServerHistory = () => {
-    if (!document || document.address.type !== "nacosConfig" || !selectedSession) return;
+    if (
+      !document ||
+      document.address.type !== "nacosConfig" ||
+      !selectedSession
+    )
+      return;
     const address = document.address;
     setServerHistoryAddress(address);
     setServerHistoryItems([]);
@@ -1169,7 +1317,8 @@ export function App() {
   };
 
   const readServerHistory = async (entry: ResourceHistoryEntry) => {
-    if (!selectedSession || !serverHistoryAddress || serverHistoryLoading) return;
+    if (!selectedSession || !serverHistoryAddress || serverHistoryLoading)
+      return;
     setServerHistoryLoading(true);
     setMessage(undefined);
     const operationId = operations.start("serverHistory");
@@ -1180,7 +1329,8 @@ export function App() {
         entry.revisionId,
         operationId,
       );
-      if (operations.isCurrent("serverHistory", operationId)) setServerHistoryDetail(detail);
+      if (operations.isCurrent("serverHistory", operationId))
+        setServerHistoryDetail(detail);
     } catch (reason) {
       if (operations.isCurrent("serverHistory", operationId)) {
         setMessage(errorMessage(reason));
@@ -1194,11 +1344,17 @@ export function App() {
 
   const openNativeInfo = async () => {
     if (!selectedSession || !selectedProfile || !document || busy) return;
-    if (document.address.type !== "etcd" && document.address.type !== "zookeeper") return;
+    if (
+      document.address.type !== "etcd" &&
+      document.address.type !== "zookeeper"
+    )
+      return;
     setNativeInfo(undefined);
     setNativeInfoOpen(true);
-    if (document.address.type === "etcd"
-      && (!document.metadata.lease || document.metadata.lease === "0")) {
+    if (
+      document.address.type === "etcd" &&
+      (!document.metadata.lease || document.metadata.lease === "0")
+    ) {
       setNativeInfoLoading(false);
       return;
     }
@@ -1207,14 +1363,18 @@ export function App() {
     setMessage(undefined);
     const operationId = startOperation();
     try {
-      setNativeInfo(await inspectNativeResource(
-        selectedSession.id,
-        document.address,
-        operationId,
-      ));
+      setNativeInfo(
+        await inspectNativeResource(
+          selectedSession.id,
+          document.address,
+          operationId,
+        ),
+      );
     } catch (reason) {
       setNativeInfoOpen(false);
-      setMessage(isCancelled(reason) ? "原生元数据读取已取消" : errorMessage(reason));
+      setMessage(
+        isCancelled(reason) ? "原生元数据读取已取消" : errorMessage(reason),
+      );
     } finally {
       finishOperation(operationId);
       setNativeInfoLoading(false);
@@ -1228,7 +1388,11 @@ export function App() {
     setMessage(undefined);
     const operationId = startOperation();
     try {
-      const result = await executeEtcdLeaseAction(selectedSession.id, action, operationId);
+      const result = await executeEtcdLeaseAction(
+        selectedSession.id,
+        action,
+        operationId,
+      );
       await reloadRoot(selectedSession.id);
       if (result.action === "revoke") {
         await stopActiveWatch();
@@ -1236,7 +1400,9 @@ export function App() {
         setNativeInfo(undefined);
         showDocument(undefined);
         setSelectedAddress(undefined);
-        setMessage(`Lease ${result.leaseId} 已撤销；关联 key 已过期，脱敏审计已记录`);
+        setMessage(
+          `Lease ${result.leaseId} 已撤销；关联 key 已过期，脱敏审计已记录`,
+        );
         return;
       }
       const refreshed = await runRead(selectedSession.id, action.address);
@@ -1244,20 +1410,26 @@ export function App() {
       setSelectedAddress(action.address);
       if (result.action === "detach") {
         setNativeInfo(undefined);
-        setMessage(`Lease ${result.previousLeaseId} 已原子解绑；key 已变为永久，脱敏审计已记录`);
+        setMessage(
+          `Lease ${result.previousLeaseId} 已原子解绑；key 已变为永久，脱敏审计已记录`,
+        );
       } else {
         try {
-          setNativeInfo(await inspectNativeResource(
-            selectedSession.id,
-            action.address,
-            newConnectionId(),
-          ));
+          setNativeInfo(
+            await inspectNativeResource(
+              selectedSession.id,
+              action.address,
+              newConnectionId(),
+            ),
+          );
         } catch {
           setNativeInfo(undefined);
         }
-        setMessage(result.action === "keepAlive"
-          ? `Lease ${result.leaseId} 已续租一次，剩余 TTL ${result.remainingTtlSeconds} 秒；脱敏审计已记录`
-          : `Lease ${result.leaseId} 已原子绑定；脱敏审计已记录`);
+        setMessage(
+          result.action === "keepAlive"
+            ? `Lease ${result.leaseId} 已续租一次，剩余 TTL ${result.remainingTtlSeconds} 秒；脱敏审计已记录`
+            : `Lease ${result.leaseId} 已原子绑定；脱敏审计已记录`,
+        );
       }
     } catch (reason) {
       const message = errorMessage(reason);
@@ -1266,11 +1438,13 @@ export function App() {
         showDocument(refreshed);
         setSelectedAddress(action.address);
         if (refreshed.metadata.lease && refreshed.metadata.lease !== "0") {
-          setNativeInfo(await inspectNativeResource(
-            selectedSession.id,
-            action.address,
-            newConnectionId(),
-          ));
+          setNativeInfo(
+            await inspectNativeResource(
+              selectedSession.id,
+              action.address,
+              newConnectionId(),
+            ),
+          );
         } else {
           setNativeInfo(undefined);
         }
@@ -1283,9 +1457,11 @@ export function App() {
         }
       }
       if (isOutcomeUnknown(reason)) setNativeInfoOpen(false);
-      setMessage(isOutcomeUnknown(reason)
-        ? `${message}；已尽力刷新 key 与 Lease 状态，请核对后再决定下一步`
-        : message);
+      setMessage(
+        isOutcomeUnknown(reason)
+          ? `${message}；已尽力刷新 key 与 Lease 状态，请核对后再决定下一步`
+          : message,
+      );
     } finally {
       finishOperation(operationId);
       setBusy(false);
@@ -1293,12 +1469,17 @@ export function App() {
   };
 
   const executeZookeeperAction = async (action: ZookeeperNativeAction) => {
-    if (!selectedSession || selectedProfile?.adapter !== "zookeeper" || busy) return;
+    if (!selectedSession || selectedProfile?.adapter !== "zookeeper" || busy)
+      return;
     setBusy(true);
     setMessage(undefined);
     const operationId = startOperation();
     try {
-      const result = await executeZookeeperNativeAction(selectedSession.id, action, operationId);
+      const result = await executeZookeeperNativeAction(
+        selectedSession.id,
+        action,
+        operationId,
+      );
       await reloadRoot(selectedSession.id);
       if (result.action === "create") {
         setPendingZookeeperAction(undefined);
@@ -1306,26 +1487,33 @@ export function App() {
         const created = await runRead(selectedSession.id, result.address);
         showDocument(created);
         setSelectedAddress(result.address);
-        const path = result.address.type === "zookeeper" ? result.address.path : "新节点";
+        const path =
+          result.address.type === "zookeeper" ? result.address.path : "新节点";
         setMessage(`${path} 已原子创建并继承父 ACL；脱敏审计已记录`);
       } else {
-        setNativeInfo(await inspectNativeResource(
-          selectedSession.id,
-          result.address,
-          newConnectionId(),
-        ));
-        setMessage(`ACL 已从 aversion ${result.previousAclVersion} 原子更新到 ${result.currentAclVersion}；脱敏审计已记录`);
+        setNativeInfo(
+          await inspectNativeResource(
+            selectedSession.id,
+            result.address,
+            newConnectionId(),
+          ),
+        );
+        setMessage(
+          `ACL 已从 aversion ${result.previousAclVersion} 原子更新到 ${result.currentAclVersion}；脱敏审计已记录`,
+        );
       }
     } catch (reason) {
       const message = errorMessage(reason);
       try {
         await reloadRoot(selectedSession.id);
         if (action.action === "setAcl") {
-          setNativeInfo(await inspectNativeResource(
-            selectedSession.id,
-            action.address,
-            newConnectionId(),
-          ));
+          setNativeInfo(
+            await inspectNativeResource(
+              selectedSession.id,
+              action.address,
+              newConnectionId(),
+            ),
+          );
         }
       } catch {
         // Best-effort reconciliation must not hide the original mutation error.
@@ -1334,9 +1522,11 @@ export function App() {
         setPendingZookeeperAction(undefined);
         setNativeInfoOpen(false);
       }
-      setMessage(isOutcomeUnknown(reason)
-        ? `${message}；已刷新资源树，请核对实际路径或 ACL 后再决定下一步`
-        : message);
+      setMessage(
+        isOutcomeUnknown(reason)
+          ? `${message}；已刷新资源树，请核对实际路径或 ACL 后再决定下一步`
+          : message,
+      );
     } finally {
       finishOperation(operationId);
       setBusy(false);
@@ -1345,7 +1535,10 @@ export function App() {
 
   const openEtcdTransaction = () => {
     if (!selectedSession || selectedProfile?.adapter !== "etcd" || busy) return;
-    setEtcdTransactionItems([emptyEtcdTransactionItem(), emptyEtcdTransactionItem()]);
+    setEtcdTransactionItems([
+      emptyEtcdTransactionItem(),
+      emptyEtcdTransactionItem(),
+    ]);
     setEtcdTransactionConfirmation("");
     setEtcdTransactionOpen(true);
   };
@@ -1357,7 +1550,8 @@ export function App() {
       const seen = new Set<string>();
       const mutations = etcdTransactionItems.map<ResourceMutation>((item) => {
         const address = etcdAddressFromInput(item.key);
-        if (seen.has(address.keyBase64)) throw new Error("同一个 etcd key 不能在一次事务中出现两次");
+        if (seen.has(address.keyBase64))
+          throw new Error("同一个 etcd key 不能在一次事务中出现两次");
         seen.add(address.keyBase64);
         if (item.operation === "create") {
           return {
@@ -1390,11 +1584,17 @@ export function App() {
     setMessage(undefined);
     const operationId = startOperation();
     try {
-      const result = await executeEtcdTransaction(selectedSession.id, transaction, operationId);
+      const result = await executeEtcdTransaction(
+        selectedSession.id,
+        transaction,
+        operationId,
+      );
       setEtcdTransactionOpen(false);
       await reloadRoot(selectedSession.id);
       const selectedResult = document
-        ? result.results.find((item) => sameAddress(item.address, document.address))
+        ? result.results.find((item) =>
+            sameAddress(item.address, document.address),
+          )
         : undefined;
       if (selectedResult?.operation === "delete") {
         await stopActiveWatch();
@@ -1403,7 +1603,9 @@ export function App() {
       } else if (selectedResult && document) {
         showDocument(await runRead(selectedSession.id, document.address));
       }
-      setMessage(`事务已在 revision ${result.revision} 原子提交 ${result.results.length} 项；脱敏审计已记录`);
+      setMessage(
+        `事务已在 revision ${result.revision} 原子提交 ${result.results.length} 项；脱敏审计已记录`,
+      );
     } catch (reason) {
       const message = errorMessage(reason);
       try {
@@ -1422,9 +1624,11 @@ export function App() {
         // The original transaction error is the actionable result.
       }
       if (isOutcomeUnknown(reason)) setEtcdTransactionOpen(false);
-      setMessage(isOutcomeUnknown(reason)
-        ? `${message}；已尽力刷新远端状态，请核对所有目标 key 后再决定下一步`
-        : message);
+      setMessage(
+        isOutcomeUnknown(reason)
+          ? `${message}；已尽力刷新远端状态，请核对所有目标 key 后再决定下一步`
+          : message,
+      );
     } finally {
       finishOperation(operationId);
       setBusy(false);
@@ -1488,7 +1692,12 @@ export function App() {
 
   const deleteCurrentConnection = async () => {
     if (dialogMode !== "edit") return;
-    if (!globalThis.confirm(`确定删除连接“${form.name}”吗？系统凭据也会一并删除。`)) return;
+    if (
+      !globalThis.confirm(
+        `确定删除连接“${form.name}”吗？系统凭据也会一并删除。`,
+      )
+    )
+      return;
     setBusy(true);
     try {
       if (selectedId === form.id) await stopActiveWatch();
@@ -1526,26 +1735,56 @@ export function App() {
   };
 
   const watchBackendIsActive = resourceWatch
-    ? ["starting", "live", "reconnecting", "compacted", "sessionExpired"].includes(resourceWatch.state)
+    ? [
+        "starting",
+        "live",
+        "reconnecting",
+        "compacted",
+        "sessionExpired",
+      ].includes(resourceWatch.state)
     : false;
 
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand"><span className="logo">A</span>Atlas Registry</div>
+        <div className="brand">
+          <span className="logo">A</span>Atlas Registry
+        </div>
         <span className="release-tag">SAFE-WRITE ALPHA</span>
         <div className="top-spacer" />
         <div className={`runtime ${capabilities ? "" : "pending"}`}>
           <span className="status-dot" />
-          {capabilities ? `Rust Core · ${capabilities.length} adapters` : "正在启动 Rust Core…"}
+          {capabilities
+            ? `Rust Core · ${capabilities.length} adapters`
+            : "正在启动 Rust Core…"}
         </div>
-        <button className="button update-button" disabled={checkingUpdate || installingUpdate} onClick={() => void checkForUpdates()}>
+        <button
+          className="button update-button"
+          disabled={checkingUpdate || installingUpdate}
+          onClick={() => void checkForUpdates()}
+        >
           {checkingUpdate ? "检查中…" : "⇩ 更新"}
         </button>
-        <button className="button" disabled={checkingUpdate || installingUpdate} onClick={() => setSettingsOpen(true)}>⚙ 设置</button>
-        <button className="button" disabled={busy} onClick={() => void exportDiagnostics()}>诊断包</button>
-        <button className="button" onClick={openHistory}>历史</button>
-        <button className="button primary" onClick={openNewConnection}>＋ 新建连接</button>
+        <button
+          className="button"
+          disabled={checkingUpdate || installingUpdate}
+          onClick={() => setSettingsOpen(true)}
+        >
+          ⚙ 设置
+        </button>
+        <button
+          className="button"
+          disabled={busy}
+          onClick={() => void exportDiagnostics()}
+        >
+          诊断包
+        </button>
+        <button className="button" onClick={openHistory}>
+          历史
+        </button>
+        <button className="button primary" onClick={openNewConnection}>
+          ＋ 新建连接
+        </button>
       </header>
 
       <div className="shell">
@@ -1564,27 +1803,57 @@ export function App() {
               disabled={busy}
               onClick={() => void selectProfile(profile)}
             >
-              <span className={`status-dot ${sessions[profile.id] ? "" : "offline"}`} />
-              <span><b>{profile.name}</b><small>{profile.endpoint} · {connectionEnvironmentLabels[profile.environment]}</small></span>
-              <span className={`badge ${profile.adapter}`}>{connectionLabel(profile.adapter)}</span>
+              <span
+                className={`status-dot ${sessions[profile.id] ? "" : "offline"}`}
+              />
+              <span>
+                <b>{profile.name}</b>
+                <small>
+                  {profile.endpoint} ·{" "}
+                  {connectionEnvironmentLabels[profile.environment]}
+                </small>
+              </span>
+              <span className={`badge ${profile.adapter}`}>
+                {connectionLabel(profile.adapter)}
+              </span>
             </button>
           ))}
 
           {selectedProfile && !selectedSession && (
-            <button className="button primary wide" disabled={busy} onClick={() => void connectAndLoad(selectedProfile)}>
+            <button
+              className="button primary wide"
+              disabled={busy}
+              onClick={() => void connectAndLoad(selectedProfile)}
+            >
               {busy ? "连接中…" : "连接并浏览"}
             </button>
           )}
           {selectedSession && (
-            <button className="button wide" onClick={() => void disconnect()}>断开连接</button>
+            <button className="button wide" onClick={() => void disconnect()}>
+              断开连接
+            </button>
           )}
           {selectedProfile && (
             <div className="connection-actions">
-              <button className="button" disabled={busy} onClick={openEditConnection}>编辑</button>
-              <button className="button" disabled={busy} onClick={openCopyConnection}>复制</button>
+              <button
+                className="button"
+                disabled={busy}
+                onClick={openEditConnection}
+              >
+                编辑
+              </button>
+              <button
+                className="button"
+                disabled={busy}
+                onClick={openCopyConnection}
+              >
+                复制
+              </button>
             </div>
           )}
-          <button className="button wide" onClick={openNewConnection}>＋ 添加连接</button>
+          <button className="button wide" onClick={openNewConnection}>
+            ＋ 添加连接
+          </button>
 
           <div className="capabilities">
             <div className="eyebrow">NATIVE RUST ADAPTERS</div>
@@ -1603,12 +1872,55 @@ export function App() {
         <section className="tree">
           <div className="tree-header">
             <b>{selectedProfile?.name ?? "资源"}</b>
-            <button className="icon-button import-resource" disabled={!selectedSession || busy} onClick={() => void chooseImportFile()} title="从 Atlas JSON 导入">⇧</button>
-            {selectedProfile?.adapter === "etcd" && <button className="icon-button transaction-resource" disabled={!selectedSession || busy} onClick={openEtcdTransaction} title="etcd 原子批量事务">T</button>}
-            {selectedProfile?.adapter === "nacos" && <button className="icon-button transaction-resource" disabled={!selectedSession || busy} onClick={() => setNacosNativeOpen(true)} title="Nacos 命名空间、服务与实例管理">N</button>}
-            <button className="icon-button create-resource" disabled={!selectedSession || busy} onClick={openCreateResource} title="新建资源">＋</button>
-            <button className="icon-button" disabled={!selectedSession || busy} onClick={() => void refreshRoot()} title="刷新">↻</button>
-            <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="筛选当前已加载资源…" />
+            <button
+              className="icon-button import-resource"
+              disabled={!selectedSession || busy}
+              onClick={() => void chooseImportFile()}
+              title="从 Atlas JSON 导入"
+            >
+              ⇧
+            </button>
+            {selectedProfile?.adapter === "etcd" && (
+              <button
+                className="icon-button transaction-resource"
+                disabled={!selectedSession || busy}
+                onClick={openEtcdTransaction}
+                title="etcd 原子批量事务"
+              >
+                T
+              </button>
+            )}
+            {selectedProfile?.adapter === "nacos" && (
+              <button
+                className="icon-button transaction-resource"
+                disabled={!selectedSession || busy}
+                onClick={() => setNacosNativeOpen(true)}
+                title="Nacos 命名空间、服务与实例管理"
+              >
+                N
+              </button>
+            )}
+            <button
+              className="icon-button create-resource"
+              disabled={!selectedSession || busy}
+              onClick={openCreateResource}
+              title="新建资源"
+            >
+              ＋
+            </button>
+            <button
+              className="icon-button"
+              disabled={!selectedSession || busy}
+              onClick={() => void refreshRoot()}
+              title="刷新"
+            >
+              ↻
+            </button>
+            <input
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder="筛选当前已加载资源…"
+            />
             <div className="resource-query">
               <input
                 value={resourceQuery}
@@ -1617,39 +1929,78 @@ export function App() {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void searchCurrentScope();
                 }}
-                placeholder={selectedProfile?.adapter === "nacos"
-                  ? "搜索 dataId；定位请填 GROUP / dataId"
-                  : selectedProfile?.adapter === "zookeeper"
-                    ? "搜索节点名；定位请填 /绝对路径"
-                    : "搜索 key；定位可填 key 或 base64:…"}
+                placeholder={
+                  selectedProfile?.adapter === "nacos"
+                    ? "搜索 dataId；定位请填 GROUP / dataId"
+                    : selectedProfile?.adapter === "zookeeper"
+                      ? "搜索节点名；定位请填 /绝对路径"
+                      : "搜索 key；定位可填 key 或 base64:…"
+                }
               />
-              <button className="button" disabled={!selectedSession || busy} onClick={() => void searchCurrentScope()}>搜索</button>
-              <button className="button" disabled={!selectedSession || busy} onClick={() => void locateResource()}>定位</button>
+              <button
+                className="button"
+                disabled={!selectedSession || busy}
+                onClick={() => void searchCurrentScope()}
+              >
+                搜索
+              </button>
+              <button
+                className="button"
+                disabled={!selectedSession || busy}
+                onClick={() => void locateResource()}
+              >
+                定位
+              </button>
             </div>
             {activeSearch && (
               <div className="search-state">
-                <span>“{activeSearch.query}” · 已检查 {activeSearch.scanned} 个标识{activeSearch.exhaustive ? " · 已完成" : ""}</span>
-                <button disabled={busy} onClick={() => void exitSearch()}>返回资源树</button>
+                <span>
+                  “{activeSearch.query}” · 已检查 {activeSearch.scanned} 个标识
+                  {activeSearch.exhaustive ? " · 已完成" : ""}
+                </span>
+                <button disabled={busy} onClick={() => void exitSearch()}>
+                  返回资源树
+                </button>
               </div>
             )}
           </div>
 
           {!selectedSession && (
-            <div className="empty"><span className="empty-icon">◇</span><b>选择并打开连接</b><span>资源会按需加载，不会扫描整个集群。</span></div>
+            <div className="empty">
+              <span className="empty-icon">◇</span>
+              <b>选择并打开连接</b>
+              <span>资源会按需加载，不会扫描整个集群。</span>
+            </div>
           )}
           {selectedSession && rows.length === 0 && !busy && (
-            <div className="empty"><span className="empty-icon">∅</span><b>{activeSearch ? "没有匹配的资源" : "当前范围没有资源"}</b><span>{activeSearch ? "可调整标识关键词，搜索不会读取资源值。" : "可以刷新，或检查所选 namespace 和权限。"}</span></div>
+            <div className="empty">
+              <span className="empty-icon">∅</span>
+              <b>{activeSearch ? "没有匹配的资源" : "当前范围没有资源"}</b>
+              <span>
+                {activeSearch
+                  ? "可调整标识关键词，搜索不会读取资源值。"
+                  : "可以刷新，或检查所选 namespace 和权限。"}
+              </span>
+            </div>
           )}
           {visibleRows.map((row) => {
             const actualIndex = rows.indexOf(row);
             if (row.kind === "more") {
               return (
-                <button className="node load-more" style={{ paddingLeft: 14 + row.depth * 20 }} key={`more-${row.cursor}`} onClick={() => void loadMore(actualIndex, row)}>
+                <button
+                  className="node load-more"
+                  style={{ paddingLeft: 14 + row.depth * 20 }}
+                  key={`more-${row.cursor}`}
+                  onClick={() => void loadMore(actualIndex, row)}
+                >
                   … 加载更多
                 </button>
               );
             }
-            const selected = selectedAddress && JSON.stringify(selectedAddress) === JSON.stringify(row.node.address);
+            const selected =
+              selectedAddress &&
+              JSON.stringify(selectedAddress) ===
+                JSON.stringify(row.node.address);
             return (
               <button
                 className={`node ${selected ? "active" : ""}`}
@@ -1657,13 +2008,30 @@ export function App() {
                 key={`${row.depth}-${row.node.name}-${JSON.stringify(row.node.address)}`}
                 onClick={() => void openResource(actualIndex, row)}
               >
-                <span className="disclosure">{row.node.hasChildren === false ? "" : row.expanded ? "⌄" : "›"}</span>
-                <span className={row.node.readable ? "key" : "folder"}>{row.node.readable ? "◇" : "◆"}</span>
+                <span className="disclosure">
+                  {row.node.hasChildren === false
+                    ? ""
+                    : row.expanded
+                      ? "⌄"
+                      : "›"}
+                </span>
+                <span className={row.node.readable ? "key" : "folder"}>
+                  {row.node.readable ? "◇" : "◆"}
+                </span>
                 <span className="node-name">{row.node.name}</span>
               </button>
             );
           })}
-          {busy && <div className="loading-line">正在与注册中心通信… {activeOperation && <button onClick={() => void cancelActiveOperation()}>取消</button>}</div>}
+          {busy && (
+            <div className="loading-line">
+              正在与注册中心通信…{" "}
+              {activeOperation && (
+                <button onClick={() => void cancelActiveOperation()}>
+                  取消
+                </button>
+              )}
+            </div>
+          )}
         </section>
 
         <main className="detail">
@@ -1675,62 +2043,170 @@ export function App() {
             </div>
           ) : (
             <>
-              <div className="breadcrumb">{selectedProfile?.name} / <b>{addressLabel(document.address)}</b></div>
+              <div className="breadcrumb">
+                {selectedProfile?.name} /{" "}
+                <b>{addressLabel(document.address)}</b>
+              </div>
               <div className="detail-title">
-                <div><span className="eyebrow">RESOURCE</span><h1>{document.name}</h1></div>
+                <div>
+                  <span className="eyebrow">RESOURCE</span>
+                  <h1>{document.name}</h1>
+                </div>
                 <div className="actions">
-                  {document.address.type === "nacosConfig" && <button className="button" disabled={busy} onClick={openServerHistory}>服务端历史</button>}
-                  {document.address.type === "nacosConfig" && <button className="button" disabled={busy} onClick={() => setNacosNativeOpen(true)}>服务管理</button>}
-                  {document.address.type === "etcd" && <button className="button" disabled={busy} onClick={() => void openNativeInfo()}>Lease</button>}
-                  {document.address.type === "zookeeper" && <button className="button" disabled={busy} onClick={() => void openNativeInfo()}>ACL</button>}
-                  <button className="button" disabled={busy} onClick={openExportDialog}>导出</button>
-                  <button className="button danger" disabled={busy || !document.version} onClick={prepareDelete}>删除</button>
-                  <button className="button primary" disabled={busy || !document.version || draftValue === document.value.content} onClick={prepareUpdate}>保存变更</button>
+                  {document.address.type === "nacosConfig" && (
+                    <button
+                      className="button"
+                      disabled={busy}
+                      onClick={openServerHistory}
+                    >
+                      服务端历史
+                    </button>
+                  )}
+                  {document.address.type === "nacosConfig" && (
+                    <button
+                      className="button"
+                      disabled={busy}
+                      onClick={() => setNacosNativeOpen(true)}
+                    >
+                      服务管理
+                    </button>
+                  )}
+                  {document.address.type === "etcd" && (
+                    <button
+                      className="button"
+                      disabled={busy}
+                      onClick={() => void openNativeInfo()}
+                    >
+                      Lease
+                    </button>
+                  )}
+                  {document.address.type === "zookeeper" && (
+                    <button
+                      className="button"
+                      disabled={busy}
+                      onClick={() => void openNativeInfo()}
+                    >
+                      ACL
+                    </button>
+                  )}
+                  <button
+                    className="button"
+                    disabled={busy}
+                    onClick={openExportDialog}
+                  >
+                    导出
+                  </button>
+                  <button
+                    className="button danger"
+                    disabled={busy || !document.version}
+                    onClick={prepareDelete}
+                  >
+                    删除
+                  </button>
+                  <button
+                    className="button primary"
+                    disabled={
+                      busy ||
+                      !document.version ||
+                      draftValue === document.value.content
+                    }
+                    onClick={prepareUpdate}
+                  >
+                    保存变更
+                  </button>
                 </div>
               </div>
               <div className="stats">
-                <div><span>版本</span><strong>{document.version || "—"}</strong></div>
-                <div><span>编码</span><strong>{document.value.encoding.toUpperCase()}</strong></div>
-                <div><span>大小</span><strong>{document.value.sizeBytes.toLocaleString()} B</strong></div>
+                <div>
+                  <span>版本</span>
+                  <strong>{document.version || "—"}</strong>
+                </div>
+                <div>
+                  <span>编码</span>
+                  <strong>{document.value.encoding.toUpperCase()}</strong>
+                </div>
+                <div>
+                  <span>大小</span>
+                  <strong>{document.value.sizeBytes.toLocaleString()} B</strong>
+                </div>
               </div>
-              <div className={`watch-panel ${resourceWatch?.state ?? "idle"} ${resourceWatch?.remoteChanged ? "changed" : ""}`}>
+              <div
+                className={`watch-panel ${resourceWatch?.state ?? "idle"} ${resourceWatch?.remoteChanged ? "changed" : ""}`}
+              >
                 <div className="watch-summary">
                   <span className="watch-pulse" />
                   <div>
-                    <b>{resourceWatch ? watchStatusLabels[resourceWatch.state] : "实时监听未开启"}</b>
+                    <b>
+                      {resourceWatch
+                        ? watchStatusLabels[resourceWatch.state]
+                        : "实时监听未开启"}
+                    </b>
                     <span>
                       {resourceWatch?.message
                         ? `${resourceWatch.message}${resourceWatch.retryInMs ? ` · ${resourceWatch.retryInMs} ms 后重试` : ""}`
-                        : (resourceWatch?.lastChange
+                        : resourceWatch?.lastChange
                           ? `${watchChangeLabels[resourceWatch.lastChange.change]} · 版本 ${resourceWatch.lastChange.version ?? "未知"}`
-                          : "监听事件只包含地址、类型和版本，不传输资源值")}
+                          : "监听事件只包含地址、类型和版本，不传输资源值"}
                     </span>
                   </div>
-                  {resourceWatch && <span className="watch-count">{resourceWatch.changeCount} 次变化</span>}
+                  {resourceWatch && (
+                    <span className="watch-count">
+                      {resourceWatch.changeCount} 次变化
+                    </span>
+                  )}
                 </div>
                 <div className="watch-actions">
                   {resourceWatch?.remoteChanged && (
-                    <button className="button primary" disabled={busy} onClick={() => void refreshWatchedResource()}>
+                    <button
+                      className="button primary"
+                      disabled={busy}
+                      onClick={() => void refreshWatchedResource()}
+                    >
                       读取最新版本
                     </button>
                   )}
                   <button
                     className="button"
                     disabled={busy}
-                    onClick={() => void (watchBackendIsActive ? stopResourceWatch() : startResourceWatch())}
+                    onClick={() =>
+                      void (watchBackendIsActive
+                        ? stopResourceWatch()
+                        : startResourceWatch())
+                    }
                   >
-                    {watchBackendIsActive ? "停止监听" : resourceWatch ? "重新监听" : "开始监听"}
+                    {watchBackendIsActive
+                      ? "停止监听"
+                      : resourceWatch
+                        ? "重新监听"
+                        : "开始监听"}
                   </button>
                 </div>
               </div>
               {document.value.encoding === "base64" && (
-                <div className="binary-warning">该值不是有效 UTF-8，已使用 Base64 展示，内容没有被替换或损坏。</div>
+                <div className="binary-warning">
+                  该值不是有效 UTF-8，已使用 Base64 展示，内容没有被替换或损坏。
+                </div>
               )}
-              <div className="editor-header"><span>{document.contentType?.toUpperCase() || "TEXT"}</span><span>{draftValue === document.value.content ? document.value.encoding.toUpperCase() : `${document.value.encoding.toUpperCase()} · 已修改`}</span></div>
-              <textarea value={draftValue} disabled={busy} onChange={(event) => setDraftValue(event.target.value)} spellCheck={false} />
+              <div className="editor-header">
+                <span>{document.contentType?.toUpperCase() || "TEXT"}</span>
+                <span>
+                  {draftValue === document.value.content
+                    ? document.value.encoding.toUpperCase()
+                    : `${document.value.encoding.toUpperCase()} · 已修改`}
+                </span>
+              </div>
+              <textarea
+                value={draftValue}
+                disabled={busy}
+                onChange={(event) => setDraftValue(event.target.value)}
+                spellCheck={false}
+              />
               <div className="metadata">
                 {Object.entries(document.metadata).map(([name, value]) => (
-                  <div className="metadata-row" key={name}><span>{name}</span><b>{value || "—"}</b></div>
+                  <div className="metadata-row" key={name}>
+                    <span>{name}</span>
+                    <b>{value || "—"}</b>
+                  </div>
                 ))}
               </div>
             </>
@@ -1738,7 +2214,11 @@ export function App() {
         </main>
       </div>
 
-      {message && <button className="toast" onClick={() => setMessage(undefined)}>{message}</button>}
+      {message && (
+        <button className="toast" onClick={() => setMessage(undefined)}>
+          {message}
+        </button>
+      )}
 
       {settingsOpen && (
         <SettingsDialog
@@ -1875,58 +2355,73 @@ export function App() {
           detail={serverHistoryDetail}
           loading={serverHistoryLoading}
           onRead={(entry) => void readServerHistory(entry)}
-          onLoadMore={() => void loadServerHistory(serverHistoryAddress, serverHistoryCursor, true)}
+          onLoadMore={() =>
+            void loadServerHistory(
+              serverHistoryAddress,
+              serverHistoryCursor,
+              true,
+            )
+          }
           onBack={() => setServerHistoryDetail(undefined)}
           onCancelOperation={() => void cancelActiveOperation()}
           onClose={() => setServerHistoryOpen(false)}
         />
       )}
 
-      {nacosNativeOpen && selectedProfile?.adapter === "nacos" && selectedSession && (
-        <NacosNativeDialog
-          profile={selectedProfile}
-          connectionId={selectedSession.id}
-          onMessage={setMessage}
-          onClose={() => setNacosNativeOpen(false)}
-        />
-      )}
+      {nacosNativeOpen &&
+        selectedProfile?.adapter === "nacos" &&
+        selectedSession && (
+          <NacosNativeDialog
+            profile={selectedProfile}
+            connectionId={selectedSession.id}
+            onMessage={setMessage}
+            onClose={() => setNacosNativeOpen(false)}
+          />
+        )}
 
-      {nativeInfoOpen
-        && selectedProfile?.adapter === "etcd"
-        && document?.address.type === "etcd"
-        && (
-        <EtcdLeaseDialog
-          key={nativeInfo?.kind === "etcdLease" ? nativeInfo.leaseId : "unbound"}
-          profile={selectedProfile}
-          document={document}
-          info={nativeInfo?.kind === "etcdLease" ? nativeInfo : undefined}
-          loading={nativeInfoLoading}
-          busy={busy}
-          onExecute={(action) => void executeLeaseAction(action)}
-          onCancelOperation={() => void cancelActiveOperation()}
-          onClose={() => {
-            setNativeInfoOpen(false);
-            setNativeInfo(undefined);
-          }}
-        />
-      )}
+      {nativeInfoOpen &&
+        selectedProfile?.adapter === "etcd" &&
+        document?.address.type === "etcd" && (
+          <EtcdLeaseDialog
+            key={
+              nativeInfo?.kind === "etcdLease" ? nativeInfo.leaseId : "unbound"
+            }
+            profile={selectedProfile}
+            document={document}
+            info={nativeInfo?.kind === "etcdLease" ? nativeInfo : undefined}
+            loading={nativeInfoLoading}
+            busy={busy}
+            onExecute={(action) => void executeLeaseAction(action)}
+            onCancelOperation={() => void cancelActiveOperation()}
+            onClose={() => {
+              setNativeInfoOpen(false);
+              setNativeInfo(undefined);
+            }}
+          />
+        )}
 
-      {nativeInfoOpen && selectedProfile?.adapter === "zookeeper" && (
-        document?.address.type === "zookeeper" && <ZookeeperAclDialog
-          key={nativeInfo?.kind === "zookeeperAcl" ? nativeInfo.aclVersion : "loading"}
-          profile={selectedProfile}
-          document={document}
-          info={nativeInfo?.kind === "zookeeperAcl" ? nativeInfo : undefined}
-          loading={nativeInfoLoading}
-          busy={busy}
-          onExecute={(action) => void executeZookeeperAction(action)}
-          onCancelOperation={() => void cancelActiveOperation()}
-          onClose={() => {
-            setNativeInfoOpen(false);
-            setNativeInfo(undefined);
-          }}
-        />
-      )}
+      {nativeInfoOpen &&
+        selectedProfile?.adapter === "zookeeper" &&
+        document?.address.type === "zookeeper" && (
+          <ZookeeperAclDialog
+            key={
+              nativeInfo?.kind === "zookeeperAcl"
+                ? nativeInfo.aclVersion
+                : "loading"
+            }
+            profile={selectedProfile}
+            document={document}
+            info={nativeInfo?.kind === "zookeeperAcl" ? nativeInfo : undefined}
+            loading={nativeInfoLoading}
+            busy={busy}
+            onExecute={(action) => void executeZookeeperAction(action)}
+            onCancelOperation={() => void cancelActiveOperation()}
+            onClose={() => {
+              setNativeInfoOpen(false);
+              setNativeInfo(undefined);
+            }}
+          />
+        )}
     </div>
   );
 }

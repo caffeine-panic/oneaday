@@ -1,0 +1,7 @@
+# Normalize all text files to LF so rustfmt/prettier checks behave identically
+# on every platform, including Windows CI checkouts.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary

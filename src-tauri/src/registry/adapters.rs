@@ -1240,7 +1240,11 @@ async fn fetch_nacos_v2_page(
     );
     session
         .request_auth
-        .apply(session.http.get(url))
+        .apply_for_config(
+            session.http.get(url),
+            public_namespace_for_sdk(&session.namespace),
+            "",
+        )
         .query(&[
             ("search", "blur".to_owned()),
             ("dataId", data_id.to_owned()),
@@ -1279,7 +1283,11 @@ async fn fetch_nacos_v3_page(
     );
     let envelope = session
         .request_auth
-        .apply(session.http.get(url))
+        .apply_for_config(
+            session.http.get(url),
+            public_namespace_for_sdk(&session.namespace),
+            "",
+        )
         .query(&[
             ("pageNo", page_number.to_string()),
             ("pageSize", limit.to_string()),
@@ -1357,7 +1365,11 @@ pub(super) async fn read_nacos_authoritative(
             );
             let response = session
                 .request_auth
-                .apply(session.http.get(url))
+                .apply_for_config(
+                    session.http.get(url),
+                    public_namespace_for_sdk(&session.namespace),
+                    group,
+                )
                 .query(&[
                     ("show", "all".to_owned()),
                     ("dataId", data_id.to_owned()),
@@ -1395,7 +1407,11 @@ pub(super) async fn read_nacos_authoritative(
             );
             let response = session
                 .request_auth
-                .apply(session.http.get(url))
+                .apply_for_config(
+                    session.http.get(url),
+                    public_namespace_for_sdk(&session.namespace),
+                    group,
+                )
                 .query(&[
                     (
                         "namespaceId",
@@ -1474,7 +1490,11 @@ async fn list_nacos_history(
             );
             session
                 .request_auth
-                .apply(session.http.get(url))
+                .apply_for_config(
+                    session.http.get(url),
+                    public_namespace_for_sdk(&session.namespace),
+                    group,
+                )
                 .query(&[
                     ("search", "accurate".to_owned()),
                     ("dataId", data_id.clone()),
@@ -1507,7 +1527,11 @@ async fn list_nacos_history(
             );
             let envelope = session
                 .request_auth
-                .apply(session.http.get(url))
+                .apply_for_config(
+                    session.http.get(url),
+                    public_namespace_for_sdk(&session.namespace),
+                    group,
+                )
                 .query(&[
                     ("dataId", data_id.clone()),
                     ("groupName", group.clone()),
@@ -1562,7 +1586,11 @@ async fn read_nacos_history(
             );
             session
                 .request_auth
-                .apply(session.http.get(url))
+                .apply_for_config(
+                    session.http.get(url),
+                    public_namespace_for_sdk(&session.namespace),
+                    group,
+                )
                 .query(&[
                     ("dataId", data_id.clone()),
                     ("group", group.clone()),
@@ -1593,7 +1621,11 @@ async fn read_nacos_history(
             );
             let envelope = session
                 .request_auth
-                .apply(session.http.get(url))
+                .apply_for_config(
+                    session.http.get(url),
+                    public_namespace_for_sdk(&session.namespace),
+                    group,
+                )
                 .query(&[
                     ("dataId", data_id.clone()),
                     ("groupName", group.clone()),

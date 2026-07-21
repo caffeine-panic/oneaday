@@ -32,7 +32,10 @@ export type ResourceWorkspaceAction =
   | { type: "address"; address?: ResourceAddress }
   | { type: "filter"; value: string }
   | { type: "query"; value: string }
-  | { type: "search"; update: (search?: ActiveSearch) => ActiveSearch | undefined }
+  | {
+      type: "search";
+      update: (search?: ActiveSearch) => ActiveSearch | undefined;
+    }
   | { type: "clearView" };
 
 export function reduceResourceWorkspace(

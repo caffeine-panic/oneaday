@@ -1,0 +1,14 @@
+# Build outputs and dependencies
+dist/
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+package-lock.json
+
+# Generated IPC contracts (owned by ts-rs; formatting them breaks drift checks)
+src/generated/
+
+# Historical artifacts kept for reference, not maintained
+prototype/
+work/
+logs/

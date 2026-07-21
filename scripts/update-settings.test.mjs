@@ -19,7 +19,9 @@ const updateSettings = await import(
 
 test("update traffic follows the operating system proxy by default", () => {
   const storage = { getItem: () => null };
-  assert.deepEqual(updateSettings.loadUpdateProxySettings(storage), { mode: "system" });
+  assert.deepEqual(updateSettings.loadUpdateProxySettings(storage), {
+    mode: "system",
+  });
 });
 
 test("a manual update proxy is trimmed and normalized before it is persisted", () => {
@@ -34,15 +36,18 @@ test("a manual update proxy is trimmed and normalized before it is persisted", (
 
 test("manual proxy credentials are not persisted in webview storage", () => {
   assert.throws(
-    () => updateSettings.normalizeUpdateProxySettings({
-      mode: "manual",
-      url: "http://user:secret@127.0.0.1:7897",
-    }),
+    () =>
+      updateSettings.normalizeUpdateProxySettings({
+        mode: "manual",
+        url: "http://user:secret@127.0.0.1:7897",
+      }),
     /用户名或密码/,
   );
 });
 
 test("corrupt persisted settings safely fall back to the system proxy", () => {
   const storage = { getItem: () => "not-json" };
-  assert.deepEqual(updateSettings.loadUpdateProxySettings(storage), { mode: "system" });
+  assert.deepEqual(updateSettings.loadUpdateProxySettings(storage), {
+    mode: "system",
+  });
 });

@@ -4,10 +4,24 @@ import type { RegistryErrorCode } from "./generated/RegistryErrorCode";
 export type { RegistryError, RegistryErrorCode };
 
 const registryErrorCodes = new Set<RegistryErrorCode>([
-  "validation", "notConnected", "unsupported", "notFound", "network",
-  "invalidResponse", "timeout", "valueTooLarge", "conflict", "outcomeUnknown",
-  "permissionDenied", "resourceExhausted", "auditIncomplete", "credentialMissing",
-  "credentialStore", "tlsConfiguration", "storage", "cancelled",
+  "validation",
+  "notConnected",
+  "unsupported",
+  "notFound",
+  "network",
+  "invalidResponse",
+  "timeout",
+  "valueTooLarge",
+  "conflict",
+  "outcomeUnknown",
+  "permissionDenied",
+  "resourceExhausted",
+  "auditIncomplete",
+  "credentialMissing",
+  "credentialStore",
+  "tlsConfiguration",
+  "storage",
+  "cancelled",
 ]);
 
 export function isRegistryError(
@@ -16,10 +30,14 @@ export function isRegistryError(
 ): reason is RegistryError {
   if (!reason || typeof reason !== "object") return false;
   if (!("code" in reason) || typeof reason.code !== "string") return false;
-  if (!("message" in reason) || typeof reason.message !== "string") return false;
-  if (!("retryable" in reason) || typeof reason.retryable !== "boolean") return false;
-  return registryErrorCodes.has(reason.code as RegistryErrorCode)
-    && (code === undefined || reason.code === code);
+  if (!("message" in reason) || typeof reason.message !== "string")
+    return false;
+  if (!("retryable" in reason) || typeof reason.retryable !== "boolean")
+    return false;
+  return (
+    registryErrorCodes.has(reason.code as RegistryErrorCode) &&
+    (code === undefined || reason.code === code)
+  );
 }
 
 export function registryErrorMessage(reason: unknown): string {
@@ -32,8 +50,13 @@ export function registryErrorMessage(reason: unknown): string {
 
 export type MutationFailureRecovery = "unknownOutcome" | "conflict" | "report";
 
-export function mutationFailureRecovery(reason: unknown): MutationFailureRecovery {
-  if (isRegistryError(reason, "outcomeUnknown") || isRegistryError(reason, "auditIncomplete")) {
+export function mutationFailureRecovery(
+  reason: unknown,
+): MutationFailureRecovery {
+  if (
+    isRegistryError(reason, "outcomeUnknown") ||
+    isRegistryError(reason, "auditIncomplete")
+  ) {
     return "unknownOutcome";
   }
   if (isRegistryError(reason, "conflict")) return "conflict";

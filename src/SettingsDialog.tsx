@@ -10,9 +10,15 @@ type SettingsDialogProps = {
   onCancel: () => void;
 };
 
-export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogProps) {
+export function SettingsDialog({
+  settings,
+  onSave,
+  onCancel,
+}: SettingsDialogProps) {
   const [draft, setDraft] = useState<UpdateProxySettings>(settings);
-  const [manualUrl, setManualUrl] = useState(settings.mode === "manual" ? settings.url : "");
+  const [manualUrl, setManualUrl] = useState(
+    settings.mode === "manual" ? settings.url : "",
+  );
   const [error, setError] = useState<string>();
 
   const selectMode = (mode: UpdateProxySettings["mode"]) => {
@@ -22,9 +28,11 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
 
   const save = () => {
     try {
-      onSave(normalizeUpdateProxySettings(
-        draft.mode === "manual" ? { mode: "manual", url: manualUrl } : draft,
-      ));
+      onSave(
+        normalizeUpdateProxySettings(
+          draft.mode === "manual" ? { mode: "manual", url: manualUrl } : draft,
+        ),
+      );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -32,22 +40,47 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
 
   return (
     <div className="dialog-backdrop" onMouseDown={onCancel}>
-      <section className="dialog settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
+      <section
+        className="dialog settings-dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <div className="dialog-heading">
-          <div><span className="eyebrow">APPLICATION SETTINGS</span><h2>设置</h2></div>
-          <button className="icon-button" onClick={onCancel}>×</button>
+          <div>
+            <span className="eyebrow">APPLICATION SETTINGS</span>
+            <h2>设置</h2>
+          </div>
+          <button className="icon-button" onClick={onCancel}>
+            ×
+          </button>
         </div>
 
         <div className="form-section">
           <div className="form-section-title">应用更新网络</div>
           <div className="proxy-options">
             <label className={draft.mode === "system" ? "selected" : ""}>
-              <input type="radio" checked={draft.mode === "system"} onChange={() => selectMode("system")} />
-              <span><b>跟随系统代理</b><small>macOS 和 Windows 读取系统 HTTP/HTTPS 代理；Linux 读取代理环境变量。</small></span>
+              <input
+                type="radio"
+                checked={draft.mode === "system"}
+                onChange={() => selectMode("system")}
+              />
+              <span>
+                <b>跟随系统代理</b>
+                <small>
+                  macOS 和 Windows 读取系统 HTTP/HTTPS 代理；Linux
+                  读取代理环境变量。
+                </small>
+              </span>
             </label>
             <label className={draft.mode === "manual" ? "selected" : ""}>
-              <input type="radio" checked={draft.mode === "manual"} onChange={() => selectMode("manual")} />
-              <span><b>手动设置</b><small>只用于检查和下载 Atlas Registry 更新。</small></span>
+              <input
+                type="radio"
+                checked={draft.mode === "manual"}
+                onChange={() => selectMode("manual")}
+              />
+              <span>
+                <b>手动设置</b>
+                <small>只用于检查和下载 Atlas Registry 更新。</small>
+              </span>
             </label>
             {draft.mode === "manual" && (
               <input
@@ -63,16 +96,27 @@ export function SettingsDialog({ settings, onSave, onCancel }: SettingsDialogPro
               />
             )}
             <label className={draft.mode === "disabled" ? "selected" : ""}>
-              <input type="radio" checked={draft.mode === "disabled"} onChange={() => selectMode("disabled")} />
-              <span><b>不使用代理</b><small>更新请求始终直连，忽略系统代理和代理环境变量。</small></span>
+              <input
+                type="radio"
+                checked={draft.mode === "disabled"}
+                onChange={() => selectMode("disabled")}
+              />
+              <span>
+                <b>不使用代理</b>
+                <small>更新请求始终直连，忽略系统代理和代理环境变量。</small>
+              </span>
             </label>
           </div>
           {error && <div className="form-error">{error}</div>}
         </div>
 
         <div className="dialog-actions">
-          <button className="button" onClick={onCancel}>取消</button>
-          <button className="button primary" onClick={save}>保存设置</button>
+          <button className="button" onClick={onCancel}>
+            取消
+          </button>
+          <button className="button primary" onClick={save}>
+            保存设置
+          </button>
         </div>
       </section>
     </div>

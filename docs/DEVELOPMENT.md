@@ -64,6 +64,18 @@ ATLAS_TEST_ETCD_TLS_SERVER_NAME=etcd.internal
 将变量前缀替换为 `ATLAS_TEST_ZOOKEEPER` 即可验证 ZooKeeper TLS；ZooKeeper
 必须提供 CA，且不支持单独覆盖 server name。
 
+阿里云 MSE Nacos 的 RAM 鉴权改用以下变量；设置后优先于 Nacos 用户名密码：
+
+```bash
+ATLAS_TEST_NACOS_ACCESS_KEY_ID=your-access-key-id \
+ATLAS_TEST_NACOS_ACCESS_KEY_SECRET=your-access-key-secret \
+ATLAS_TEST_NACOS_ENDPOINT=mse-instance.nacos-ans.mse.aliyuncs.com:8848 \
+cargo test --manifest-path src-tauri/Cargo.toml --test live_registry \
+  nacos_live_session_can_browse_the_config_list -- --ignored --exact
+```
+
+AccessKey Secret 只作为 `ConnectionSecret` 进入测试进程，不写入连接配置或测试输出。
+
 若要同时验证读取与元数据，提供已有的只读 fixture：
 
 ```bash
