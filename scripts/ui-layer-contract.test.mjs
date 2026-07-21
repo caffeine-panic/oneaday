@@ -21,11 +21,12 @@ function numericDeclaration(selector, property) {
 
 function selectorsDeclaringZIndex(className) {
   return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-    .filter(([, selectors, declarations]) =>
-      selectors
-        .split(",")
-        .some((selector) => selector.trim().includes(className)) &&
-      /z-index\s*:/.test(declarations),
+    .filter(
+      ([, selectors, declarations]) =>
+        selectors
+          .split(",")
+          .some((selector) => selector.trim().includes(className)) &&
+        /z-index\s*:/.test(declarations),
     )
     .map(([, selectors]) => selectors.trim());
 }

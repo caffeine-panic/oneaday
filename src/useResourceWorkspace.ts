@@ -23,18 +23,22 @@ export function useResourceWorkspace() {
   return {
     state,
     clearView: () => dispatch({ type: "clearView" }),
-    showDocument: (document?: ResourceDocument) => dispatch({ type: "document", document }),
-    setRows: (update: SetStateAction<TreeRow[]>) => dispatch({
-      type: "rows",
-      update: (current) => resolve(update, current),
-    }),
+    showDocument: (document?: ResourceDocument) =>
+      dispatch({ type: "document", document }),
+    setRows: (update: SetStateAction<TreeRow[]>) =>
+      dispatch({
+        type: "rows",
+        update: (current) => resolve(update, current),
+      }),
     setDraftValue: (value: string) => dispatch({ type: "draft", value }),
-    setSelectedAddress: (address?: ResourceAddress) => dispatch({ type: "address", address }),
+    setSelectedAddress: (address?: ResourceAddress) =>
+      dispatch({ type: "address", address }),
     setFilter: (value: string) => dispatch({ type: "filter", value }),
     setResourceQuery: (value: string) => dispatch({ type: "query", value }),
-    setActiveSearch: (update: SetStateAction<ActiveSearch | undefined>) => dispatch({
-      type: "search",
-      update: (current) => resolve(update, current),
-    }),
+    setActiveSearch: (update: SetStateAction<ActiveSearch | undefined>) =>
+      dispatch({
+        type: "search",
+        update: (current) => resolve(update, current),
+      }),
   };
 }

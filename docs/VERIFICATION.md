@@ -6,11 +6,11 @@
 
 以下六条契约均在 loopback 隔离实例上通过，mutation 模式会创建唯一 fixture 并在结束时清理：
 
-| 协议 | 服务版本 | 已验证契约 |
-| --- | --- | --- |
-| etcd | 3.6.11、3.7.0 | 连接、分页浏览、读取、条件写、watch、冲突、Lease 全生命周期、64 位 Lease ID、原子 transaction |
-| ZooKeeper | 3.8.6、3.9.5 | 连接、懒加载、读写、one-shot watch 续订、version 冲突、ACL aversion 条件写、persistent/sequential/ephemeral 节点与 session 清理 |
-| Nacos | 2.5.2、3.2.3 | 配置列表/读写/MD5 冲突、SDK listener 与权威 MD5 对账、服务端历史、namespace/service、persistent instance 管理，以及 Naming SDK ephemeral instance 注册/更新/注销与写后回读 |
+| 协议      | 服务版本      | 已验证契约                                                                                                                                                                 |
+| --------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| etcd      | 3.6.11、3.7.0 | 连接、分页浏览、读取、条件写、watch、冲突、Lease 全生命周期、64 位 Lease ID、原子 transaction                                                                              |
+| ZooKeeper | 3.8.6、3.9.5  | 连接、懒加载、读写、one-shot watch 续订、version 冲突、ACL aversion 条件写、persistent/sequential/ephemeral 节点与 session 清理                                            |
+| Nacos     | 2.5.2、3.2.3  | 配置列表/读写/MD5 冲突、SDK listener 与权威 MD5 对账、服务端历史、namespace/service、persistent instance 管理，以及 Naming SDK ephemeral instance 注册/更新/注销与写后回读 |
 
 etcd 使用仓库兼容脚本：
 

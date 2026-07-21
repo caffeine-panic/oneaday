@@ -1,8 +1,4 @@
-import type {
-  ResourceAddress,
-  ResourceNode,
-  ResourcePage,
-} from "./registry";
+import type { ResourceAddress, ResourceNode, ResourcePage } from "./registry";
 
 export type ResourceRow = {
   kind: "resource";
@@ -36,7 +32,8 @@ export function pageRows(
     depth,
     expanded: false,
   }));
-  if (nextCursor) rows.push({ kind: "more", parent, cursor: nextCursor, depth });
+  if (nextCursor)
+    rows.push({ kind: "more", parent, cursor: nextCursor, depth });
   return rows;
 }
 
@@ -47,9 +44,9 @@ export function searchPageRows(
   nextCursor?: string,
 ): TreeRow[] {
   const rows = pageRows(items, 0, scope, nextCursor);
-  return rows.map((row) => row.kind === "more"
-    ? { ...row, search: { scope, query } }
-    : row);
+  return rows.map((row) =>
+    row.kind === "more" ? { ...row, search: { scope, query } } : row,
+  );
 }
 
 function sameAddress(left: ResourceAddress, right: ResourceAddress): boolean {
@@ -62,7 +59,12 @@ export function collapseResourceRow(
   expectedAddress: ResourceAddress,
 ): TreeRow[] {
   const row = rows[index];
-  if (!row || row.kind !== "resource" || !sameAddress(row.node.address, expectedAddress)) return rows;
+  if (
+    !row ||
+    row.kind !== "resource" ||
+    !sameAddress(row.node.address, expectedAddress)
+  )
+    return rows;
   const next = [...rows];
   next[index] = { ...row, expanded: false };
   let end = index + 1;
@@ -77,7 +79,12 @@ export function expandResourceRow(
   page: ResourcePage,
 ): TreeRow[] {
   const row = rows[index];
-  if (!row || row.kind !== "resource" || !sameAddress(row.node.address, page.parent)) return rows;
+  if (
+    !row ||
+    row.kind !== "resource" ||
+    !sameAddress(row.node.address, page.parent)
+  )
+    return rows;
   const next = [...rows];
   next[index] = {
     ...row,
@@ -102,7 +109,12 @@ export function replaceContinuationRow(
   expected: MoreRow,
 ): TreeRow[] {
   const row = rows[index];
-  if (!row || row.kind !== "more" || JSON.stringify(row) !== JSON.stringify(expected)) return rows;
+  if (
+    !row ||
+    row.kind !== "more" ||
+    JSON.stringify(row) !== JSON.stringify(expected)
+  )
+    return rows;
   const next = [...rows];
   next.splice(index, 1, ...replacement);
   return next;

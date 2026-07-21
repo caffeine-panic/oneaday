@@ -48,16 +48,22 @@ export type AdapterDescriptor = {
   >;
 };
 
-export type CredentialUpdate = {
-  operation: "preserve";
-} | {
-  operation: "replace";
-  secret: string;
-} | {
-  operation: "clear";
-};
+export type CredentialUpdate =
+  | {
+      operation: "preserve";
+    }
+  | {
+      operation: "replace";
+      secret: string;
+    }
+  | {
+      operation: "clear";
+    };
 
-export const connectionEnvironmentLabels: Record<ConnectionEnvironment, string> = {
+export const connectionEnvironmentLabels: Record<
+  ConnectionEnvironment,
+  string
+> = {
   unspecified: "未指定",
   development: "开发",
   testing: "测试",
@@ -154,7 +160,12 @@ export type NativeResourceInfo =
       entries: ZookeeperAclEntry[];
     };
 
-export type ZookeeperAclPermission = "read" | "write" | "create" | "delete" | "admin";
+export type ZookeeperAclPermission =
+  | "read"
+  | "write"
+  | "create"
+  | "delete"
+  | "admin";
 
 export type ZookeeperAclEntry = {
   scheme: string;
@@ -412,7 +423,11 @@ export type ImportApplyResult = {
   remaining: number;
 };
 
-export type AuditHistoryKind = "started" | "applied" | "failed" | "outcomeUnknown";
+export type AuditHistoryKind =
+  | "started"
+  | "applied"
+  | "failed"
+  | "outcomeUnknown";
 
 export type AuditHistoryItem = {
   kind: AuditHistoryKind;
@@ -472,7 +487,9 @@ export function exportDiagnosticBundle() {
 }
 
 export function checkForAppUpdate(proxySettings: UpdateProxySettings) {
-  return invoke<AppUpdateInfo | null>("check_for_app_update", { proxySettings });
+  return invoke<AppUpdateInfo | null>("check_for_app_update", {
+    proxySettings,
+  });
 }
 
 export function installAppUpdate(onEvent: (event: AppUpdateEvent) => void) {
@@ -488,11 +505,16 @@ export function upsertConnectionProfile(
   profile: ConnectionProfile,
   credentialUpdate: CredentialUpdate,
 ) {
-  return invoke<ConnectionProfile[]>("upsert_connection_profile", { profile, credentialUpdate });
+  return invoke<ConnectionProfile[]>("upsert_connection_profile", {
+    profile,
+    credentialUpdate,
+  });
 }
 
 export function deleteConnectionProfile(connectionId: string) {
-  return invoke<ConnectionProfile[]>("delete_connection_profile", { connectionId });
+  return invoke<ConnectionProfile[]>("delete_connection_profile", {
+    connectionId,
+  });
 }
 
 export function probeConnection(
@@ -635,9 +657,12 @@ export function executeZookeeperNativeAction(
   nativeAction: ZookeeperNativeAction,
   operationId: string,
 ) {
-  return invoke<ZookeeperNativeActionResult>("execute_zookeeper_native_action", {
-    request: { connectionId, nativeAction, operationId, confirmed: true },
-  });
+  return invoke<ZookeeperNativeActionResult>(
+    "execute_zookeeper_native_action",
+    {
+      request: { connectionId, nativeAction, operationId, confirmed: true },
+    },
+  );
 }
 
 export function listNacosNamespaces(connectionId: string, operationId: string) {

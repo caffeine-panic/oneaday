@@ -8,6 +8,18 @@ edition = "2024"
 name = "atlas_registry_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# CI runs clippy with `-D warnings`, so every entry below is effectively deny.
+# These encode repo invariants; relax them only with a written justification.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

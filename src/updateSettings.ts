@@ -9,7 +9,9 @@ type WritableStorage = Pick<Storage, "setItem">;
 const STORAGE_KEY = "atlas.updateProxySettings";
 const DEFAULT_SETTINGS: UpdateProxySettings = { mode: "system" };
 
-export function normalizeUpdateProxySettings(settings: UpdateProxySettings): UpdateProxySettings {
+export function normalizeUpdateProxySettings(
+  settings: UpdateProxySettings,
+): UpdateProxySettings {
   if (settings.mode !== "manual") return { mode: settings.mode };
 
   const rawUrl = settings.url.trim();
@@ -38,7 +40,8 @@ export function loadUpdateProxySettings(
     const raw = storage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<UpdateProxySettings>;
-    if (parsed.mode === "system" || parsed.mode === "disabled") return { mode: parsed.mode };
+    if (parsed.mode === "system" || parsed.mode === "disabled")
+      return { mode: parsed.mode };
     if (parsed.mode === "manual" && typeof parsed.url === "string") {
       return normalizeUpdateProxySettings({ mode: "manual", url: parsed.url });
     }
