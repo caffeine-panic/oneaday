@@ -44,10 +44,20 @@ impl NacosRequestAuth {
         namespace: &str,
         group: &str,
     ) -> reqwest::RequestBuilder {
+        self.apply_for_config_at(request, namespace, group, current_timestamp_millis())
+    }
+
+    fn apply_for_config_at(
+        &self,
+        request: reqwest::RequestBuilder,
+        namespace: &str,
+        group: &str,
+        timestamp_millis: u128,
+    ) -> reqwest::RequestBuilder {
         self.apply_with_resource_at(
             request,
-            &mse_config_resource(namespace, group),
-            current_timestamp_millis(),
+            &mse_http_config_resource(namespace, group),
+            timestamp_millis,
         )
     }
 
@@ -85,7 +95,15 @@ impl NacosRequestAuth {
     }
 }
 
-fn mse_config_resource(namespace: &str, group: &str) -> String {
+fn mse_http_config_resource(namespace: &str, group: &str) -> String {
+    if namespace.is_empty() {
+        group.to_owned()
+    } else {
+        format!("{namespace}+{group}")
+    }
+}
+
+fn mse_sdk_config_resource(namespace: &str, group: &str) -> String {
     match (namespace.is_empty(), group.is_empty()) {
         (false, false) => format!("{namespace}+{group}"),
         (false, true) => namespace.to_owned(),
@@ -279,7 +297,7 @@ fn mse_sdk_identity_at(
         "Config" => {
             let signature = mse_signature(
                 access_key_secret,
-                &mse_config_resource(
+                &mse_sdk_config_resource(
                     resource.namespace.as_deref().unwrap_or_default(),
                     resource.group.as_deref().unwrap_or_default(),
                 ),
@@ -463,6 +481,29 @@ mod tests {
     }
 
     #[test]
+    fn mse_config_list_http_signature_preserves_the_empty_group_separator() {
+        let auth = NacosRequestAuth::MseAccessKey {
+            access_key_id: "LTAI_REDACTED".to_owned(),
+            access_key_secret: Arc::new(ConnectionSecret::new("SECRET_REDACTED")),
+        };
+        let request = auth
+            .apply_for_config_at(
+                reqwest::Client::new().get("http://mse.test/nacos/v1/cs/configs"),
+                "tenant-a",
+                "",
+                1_720_000_000_000,
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(request.headers().get("Timestamp").unwrap(), "1720000000000");
+        assert_eq!(
+            request.headers().get("Spas-Signature").unwrap(),
+            "7IRjtoqhaS6T9OJWstRfhq5MvQo="
+        );
+    }
+
+    #[test]
     fn mse_access_key_profile_configures_the_nacos_clients_for_ram_authentication() {
         let profile = ConnectionProfile {
             id: "mse".to_owned(),
@@ -518,6 +559,22 @@ mod tests {
         assert_eq!(
             config.get("Spas-Signature").unwrap(),
             "O+p5azqJh6vbdus58N3La0NqYZw="
+        );
+
+        let config_without_group = mse_sdk_identity_at(
+            "LTAI_REDACTED",
+            &secret,
+            RequestResource {
+                request_type: "Config".to_owned(),
+                namespace: Some("tenant-a".to_owned()),
+                group: Some(String::new()),
+                resource: None,
+            },
+            1_720_000_000_000,
+        );
+        assert_eq!(
+            config_without_group.get("Spas-Signature").unwrap(),
+            "SHmX66q5jB21RdrcGFDfZ+atK1A="
         );
 
         let naming = mse_sdk_identity_at(
