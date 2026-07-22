@@ -4,6 +4,20 @@ import test from "node:test";
 import ts from "typescript";
 
 const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const appSource = readFileSync(
+  new URL("../src/App.tsx", import.meta.url),
+  "utf8",
+);
+const mainSource = readFileSync(
+  new URL("../src/main.tsx", import.meta.url),
+  "utf8",
+);
+const tauriConfig = JSON.parse(
+  readFileSync(
+    new URL("../src-tauri/tauri.conf.json", import.meta.url),
+    "utf8",
+  ),
+);
 const connectionAuthSource = readFileSync(
   new URL("../src/connectionAuth.ts", import.meta.url),
   "utf8",
@@ -57,6 +71,36 @@ test("global result toast stays above the blurred modal backdrop", () => {
     numericDeclaration(".toast", "z-index") >
       numericDeclaration(".dialog-backdrop", "z-index"),
     "the toast is treated as background content and blurred while a dialog is open",
+  );
+});
+
+test("macOS window chrome blends into a draggable application top bar", () => {
+  const mainWindow = tauriConfig.app?.windows?.[0];
+
+  assert.equal(mainWindow?.titleBarStyle, "Overlay");
+  assert.equal(mainWindow?.hiddenTitle, true);
+  assert.equal(mainWindow?.theme, "Dark");
+  assert.equal(mainWindow?.backgroundColor, "#0d141d");
+  assert.deepEqual(mainWindow?.trafficLightPosition, { x: 16, y: 20 });
+  assert.match(
+    appSource,
+    /<header\s+className="topbar"\s+data-tauri-drag-region>/,
+  );
+  assert.match(
+    appSource,
+    /<div\s+className="top-spacer"\s+data-tauri-drag-region\s*\/>/,
+  );
+  assert.match(
+    mainSource,
+    /isTauri\(\).*navigator\.userAgent\.includes\("Mac"\)/s,
+  );
+  assert.match(
+    mainSource,
+    /document\.documentElement\.dataset\.platform\s*=\s*"macos"/,
+  );
+  assert.match(
+    css,
+    /html\[data-platform="macos"\]\s+\.topbar\s*\{[^}]*padding-left:\s*82px/s,
   );
 });
 
