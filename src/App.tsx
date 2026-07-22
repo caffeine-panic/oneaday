@@ -1746,12 +1746,12 @@ export function App() {
 
   return (
     <div className="app">
-      <header className="topbar">
+      <header className="topbar" data-tauri-drag-region>
         <div className="brand">
           <span className="logo">A</span>Atlas Registry
         </div>
         <span className="release-tag">SAFE-WRITE ALPHA</span>
-        <div className="top-spacer" />
+        <div className="top-spacer" data-tauri-drag-region />
         <div className={`runtime ${capabilities ? "" : "pending"}`}>
           <span className="status-dot" />
           {capabilities

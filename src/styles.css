@@ -45,6 +45,11 @@ select:focus-visible {
   padding: 0 20px;
   border-bottom: 1px solid #263447;
   background: #0d141d;
+  user-select: none;
+  -webkit-user-select: none;
+}
+html[data-platform="macos"] .topbar {
+  padding-left: 82px;
 }
 .brand {
   display: flex;
