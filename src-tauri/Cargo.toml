@@ -1,6 +1,6 @@
 [package]
 name = "atlas-registry"
-version = "0.5.3"
+version = "0.5.4"
 description = "A unified registry center desktop client"
 edition = "2024"
 
