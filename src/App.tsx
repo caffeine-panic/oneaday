@@ -1746,7 +1746,7 @@ export function App() {
 
   return (
     <div className="app">
-      <header className="topbar" data-tauri-drag-region>
+      <header className="topbar" data-tauri-drag-region="deep">
         <div className="brand">
           <span className="logo">A</span>Atlas Registry
         </div>
