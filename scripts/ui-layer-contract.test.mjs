@@ -12,6 +12,10 @@ const mainSource = readFileSync(
   new URL("../src/main.tsx", import.meta.url),
   "utf8",
 );
+const toastSource = readFileSync(
+  new URL("../src/Toast.tsx", import.meta.url),
+  "utf8",
+);
 const tauriConfig = JSON.parse(
   readFileSync(
     new URL("../src-tauri/tauri.conf.json", import.meta.url),
@@ -117,6 +121,42 @@ test("overlay window chrome authorizes native window dragging", () => {
   assert.ok(
     defaultCapability.permissions.includes("core:window:allow-start-dragging"),
     "the overlay title bar cannot move the native window without the start_dragging permission",
+  );
+});
+
+test("successful notices fade after four seconds and pause while interactive", () => {
+  assert.match(toastSource, /toastAutoDismisses\(toast\.tone\)/);
+  assert.match(
+    toastSource,
+    /globalThis\.setTimeout\([\s\S]*?remainingMs\.current,\s*\)/,
+  );
+  assert.match(toastSource, /onMouseEnter=\{\(\) => setHovered\(true\)\}/);
+  assert.match(toastSource, /onMouseLeave=\{\(\) => setHovered\(false\)\}/);
+  assert.match(toastSource, /onFocus=\{\(\) => setFocused\(true\)\}/);
+  assert.match(toastSource, /onBlur=/);
+  assert.match(
+    css,
+    /\.toast--auto-dismiss\s*\{[^}]*animation:\s*toast-dismiss\s+4s/s,
+  );
+  assert.match(
+    css,
+    /\.toast--auto-dismiss:hover,[\s\S]*\.toast--auto-dismiss:focus-within\s*\{[^}]*animation-play-state:\s*paused/s,
+  );
+});
+
+test("connection success uses the typed dismissing notice path", () => {
+  assert.match(appSource, /showSuccess\("连接已断开"\)/);
+  assert.match(appSource, /<Toast\s+key=\{toast\.id\}/);
+  assert.doesNotMatch(appSource, /<button\s+className="toast"/);
+});
+
+test("every application notice declares its lifecycle explicitly", () => {
+  assert.doesNotMatch(appSource, /\bsetMessage\(/);
+  assert.match(appSource, /showSuccess\(`已连接 \$\{session\.endpoint\}`\)/);
+  assert.match(appSource, /showError\(reason\)/);
+  assert.match(
+    appSource,
+    /showWarning\(`变更已成功，但刷新失败：\$\{errorMessage\(reason\)\}`\)/,
   );
 });
 

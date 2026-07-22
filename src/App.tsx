@@ -13,6 +13,8 @@ import {
 } from "./resourceTree";
 import { UpdateDialog, type UpdateProgress } from "./UpdateDialog";
 import { SettingsDialog } from "./SettingsDialog";
+import { Toast } from "./Toast";
+import { nextToast, type ToastMessage, type ToastTone } from "./toastState";
 import {
   loadUpdateProxySettings,
   saveUpdateProxySettings,
@@ -292,7 +294,17 @@ export function App() {
     setActiveSearch,
   } = useResourceWorkspace();
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string>();
+  const [toast, setToast] = useState<ToastMessage>();
+  const showToast = (text: string, tone: ToastTone) =>
+    setToast((current) => nextToast(current, text, tone));
+  const clearToast = () => setToast(undefined);
+  const showSuccess = (text: string) => showToast(text, "success");
+  const showInfo = (text: string) => showToast(text, "info");
+  const showWarning = (text: string) => showToast(text, "warning");
+  const showErrorText = (text: string) => showToast(text, "error");
+  const showError = (reason: unknown) => showErrorText(errorMessage(reason));
+  const dismissToast = (id: number) =>
+    setToast((current) => (current?.id === id ? undefined : current));
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo>();
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
@@ -359,10 +371,18 @@ export function App() {
   useEffect(() => {
     registryCapabilities()
       .then(setCapabilities)
-      .catch((reason: unknown) => setMessage(errorMessage(reason)));
+      .catch((reason: unknown) =>
+        setToast((current) =>
+          nextToast(current, errorMessage(reason), "error"),
+        ),
+      );
     loadConnectionProfiles()
       .then(setProfiles)
-      .catch((reason: unknown) => setMessage(errorMessage(reason)));
+      .catch((reason: unknown) =>
+        setToast((current) =>
+          nextToast(current, errorMessage(reason), "error"),
+        ),
+      );
   }, []);
 
   useEffect(
@@ -393,17 +413,17 @@ export function App() {
   const checkForUpdates = async () => {
     if (checkingUpdate || installingUpdate) return;
     setCheckingUpdate(true);
-    setMessage(undefined);
+    clearToast();
     try {
       const update = await checkForAppUpdate(updateProxySettings);
       if (!update) {
-        setMessage("当前已是最新版本");
+        showInfo("当前已是最新版本");
         return;
       }
       setUpdateProgress(undefined);
       setAvailableUpdate(update);
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setCheckingUpdate(false);
     }
@@ -413,7 +433,7 @@ export function App() {
     if (!availableUpdate || installingUpdate) return;
     setInstallingUpdate(true);
     setUpdateProgress({ phase: "downloading", downloaded: 0 });
-    setMessage(undefined);
+    clearToast();
     const onEvent = (event: AppUpdateEvent) => {
       if (event.event === "started") {
         setUpdateProgress({
@@ -439,7 +459,7 @@ export function App() {
       await installAppUpdate(onEvent);
     } catch (reason) {
       setInstallingUpdate(false);
-      setMessage(errorMessage(reason));
+      showError(reason);
     }
   };
 
@@ -493,7 +513,7 @@ export function App() {
     try {
       await stopWatch(active.subscriptionId);
     } catch (reason) {
-      if (!clearView) setMessage(errorMessage(reason));
+      if (!clearView) showError(reason);
     }
   };
 
@@ -565,7 +585,7 @@ export function App() {
           ? { ...current, state: "failed", message: errorMessage(reason) }
           : current,
       );
-      setMessage(errorMessage(reason));
+      showError(reason);
     }
   };
 
@@ -594,13 +614,13 @@ export function App() {
       return;
     }
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     try {
       showDocument(await runRead(selectedSession.id, document.address));
       setResourceWatch((current) =>
         current ? { ...current, remoteChanged: false } : current,
       );
-      setMessage("已读取远端最新版本");
+      showSuccess("已读取远端最新版本");
     } catch (reason) {
       if (isNotFound(reason)) {
         await stopActiveWatch();
@@ -611,9 +631,9 @@ export function App() {
         } catch {
           // The deletion is already known; a tree refresh failure should not restore stale content.
         }
-        setMessage("远端资源已删除，已移除本地旧内容");
+        showWarning("远端资源已删除，已移除本地旧内容");
       } else {
-        setMessage(`刷新监听资源失败：${errorMessage(reason)}`);
+        showErrorText(`刷新监听资源失败：${errorMessage(reason)}`);
       }
     } finally {
       setBusy(false);
@@ -630,7 +650,7 @@ export function App() {
     try {
       await operations.cancel("main");
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     }
   };
 
@@ -643,7 +663,7 @@ export function App() {
     setNativeInfoOpen(false);
     setNativeInfo(undefined);
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     clearView();
     try {
       const operationId = startOperation();
@@ -656,10 +676,10 @@ export function App() {
       setSessions((current) => ({ ...current, [session.id]: session }));
       setSelectedId(session.id);
       await reloadRoot(session.id);
-      setMessage(`已连接 ${session.endpoint}`);
+      showSuccess(`已连接 ${session.endpoint}`);
       return true;
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
       return false;
     } finally {
       setBusy(false);
@@ -669,7 +689,7 @@ export function App() {
   const saveAndConnect = async () => {
     const candidate = normalizedProfile(form);
     if (!candidate.name || !candidate.endpoint) {
-      setMessage("连接名称和 endpoint 不能为空");
+      showErrorText("连接名称和 endpoint 不能为空");
       return;
     }
     if (
@@ -677,7 +697,7 @@ export function App() {
       dialogMode !== "edit" &&
       !connectionSecret
     ) {
-      setMessage("新连接启用认证时必须填写密钥");
+      showErrorText("新连接启用认证时必须填写密钥");
       return;
     }
     try {
@@ -696,19 +716,19 @@ export function App() {
       await connectAndLoad(candidate, connectionSecret || undefined);
       setConnectionSecret("");
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     }
   };
 
   const testConnection = async () => {
     const candidate = normalizedProfile(form);
     if (!candidate.name || !candidate.endpoint) {
-      setMessage("连接名称和 endpoint 不能为空");
+      showErrorText("连接名称和 endpoint 不能为空");
       return;
     }
     setBusy(true);
     setTestingConnection(true);
-    setMessage(undefined);
+    clearToast();
     const operationId = startOperation();
     try {
       const result = await probeConnection(
@@ -716,9 +736,10 @@ export function App() {
         operationId,
         connectionSecret || undefined,
       );
-      setMessage(`连接测试成功：${result.endpoint}`);
+      showSuccess(`连接测试成功：${result.endpoint}`);
     } catch (reason) {
-      setMessage(isCancelled(reason) ? "连接测试已取消" : errorMessage(reason));
+      if (isCancelled(reason)) showInfo("连接测试已取消");
+      else showError(reason);
     } finally {
       finishOperation(operationId);
       setTestingConnection(false);
@@ -744,14 +765,14 @@ export function App() {
     setServerHistoryOpen(false);
     setNativeInfoOpen(false);
     setNativeInfo(undefined);
-    setMessage(undefined);
+    clearToast();
 
     if (selectionPlan === "reload" && session) {
       setBusy(true);
       try {
         await reloadRoot(session.id);
       } catch (reason) {
-        setMessage(errorMessage(reason));
+        showError(reason);
       } finally {
         setBusy(false);
       }
@@ -761,11 +782,11 @@ export function App() {
   const refreshRoot = async () => {
     if (!selectedSession || busy) return;
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     try {
       await reloadRoot(selectedSession.id);
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -775,12 +796,12 @@ export function App() {
     if (!selectedSession || !selectedProfile || busy) return;
     const query = resourceQuery.trim();
     if (!query) {
-      setMessage("请输入要搜索的资源标识");
+      showErrorText("请输入要搜索的资源标识");
       return;
     }
     const scope = searchScope(selectedProfile.adapter, selectedAddress);
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     try {
       const page = await runSearch(selectedSession.id, scope, query);
       setRows(searchPageRows(page.items, page.scope, query, page.nextCursor));
@@ -791,11 +812,11 @@ export function App() {
         exhaustive: page.exhaustive,
       });
       setFilter("");
-      setMessage(
+      showInfo(
         `${page.items.length} 个匹配项 · 本次检查 ${page.scanned} 个标识${page.exhaustive ? " · 已到当前范围末尾" : " · 可继续加载"}`,
       );
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -807,7 +828,7 @@ export function App() {
     try {
       address = locateAddress(selectedProfile.adapter, resourceQuery);
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
       return;
     }
     if (
@@ -820,14 +841,14 @@ export function App() {
     if (!document || !sameAddress(document.address, address))
       await stopActiveWatch();
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     setSelectedAddress(address);
     try {
       showDocument(await runRead(selectedSession.id, address));
-      setMessage("已精确定位并读取资源");
+      showSuccess("已精确定位并读取资源");
     } catch (reason) {
       showDocument(undefined);
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -836,11 +857,11 @@ export function App() {
   const exitSearch = async () => {
     if (!selectedSession || busy) return;
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     try {
       await reloadRoot(selectedSession.id);
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -852,7 +873,7 @@ export function App() {
       await stopActiveWatch();
     }
     setSelectedAddress(row.node.address);
-    setMessage(undefined);
+    clearToast();
 
     if (row.node.readable) {
       setBusy(true);
@@ -860,7 +881,7 @@ export function App() {
         showDocument(await runRead(selectedSession.id, row.node.address));
       } catch (reason) {
         showDocument(undefined);
-        setMessage(errorMessage(reason));
+        showError(reason);
         if (isCancelled(reason)) return;
       } finally {
         setBusy(false);
@@ -880,7 +901,7 @@ export function App() {
       const page = await runList(selectedSession.id, row.node.address);
       setRows((current) => expandResourceRow(current, index, page));
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -931,7 +952,7 @@ export function App() {
         ),
       );
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -949,7 +970,7 @@ export function App() {
     let address: ResourceAddress;
     if (selectedProfile.adapter === "etcd") {
       if (!resourceDraft.keyOrPath.trim()) {
-        setMessage("etcd key 不能为空");
+        showErrorText("etcd key 不能为空");
         return;
       }
       address = {
@@ -964,7 +985,9 @@ export function App() {
         path.endsWith("/") ||
         path.includes("//")
       ) {
-        setMessage("ZooKeeper 路径必须是规范的绝对非根路径，且不能以 / 结尾");
+        showErrorText(
+          "ZooKeeper 路径必须是规范的绝对非根路径，且不能以 / 结尾",
+        );
         return;
       }
       address = { type: "zookeeper", path };
@@ -972,7 +995,7 @@ export function App() {
       const group = resourceDraft.group.trim();
       const dataId = resourceDraft.dataId.trim();
       if (!group || !dataId || !resourceDraft.content) {
-        setMessage("Nacos 创建需要 group、dataId 和非空内容");
+        showErrorText("Nacos 创建需要 group、dataId 和非空内容");
         return;
       }
       address = { type: "nacosConfig", group, dataId };
@@ -1003,7 +1026,7 @@ export function App() {
 
   const prepareUpdate = () => {
     if (!document?.version) {
-      setMessage("当前资源没有可用于条件更新的版本，请先刷新");
+      showErrorText("当前资源没有可用于条件更新的版本，请先刷新");
       return;
     }
     setPendingMutation({
@@ -1018,7 +1041,7 @@ export function App() {
 
   const prepareDelete = () => {
     if (!document?.version) {
-      setMessage("当前资源没有可用于条件删除的版本，请先刷新");
+      showErrorText("当前资源没有可用于条件删除的版本，请先刷新");
       return;
     }
     setPendingMutation({
@@ -1050,7 +1073,7 @@ export function App() {
     if (!selectedSession || !pendingMutation || busy) return;
     const mutation = pendingMutation;
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     const operationId = startOperation();
     let result: Awaited<ReturnType<typeof mutateResource>>;
     try {
@@ -1065,7 +1088,7 @@ export function App() {
           mutation.address,
         );
         setPendingMutation(undefined);
-        setMessage(
+        showErrorText(
           reconciled
             ? `${message}；已重新读取远端状态`
             : `${message}；自动回读失败，远端结果仍未知，请先恢复连接并刷新，勿直接重试`,
@@ -1077,13 +1100,13 @@ export function App() {
             mutation.address,
           );
           setPendingMutation(undefined);
-          setMessage(
+          showErrorText(
             reconciled
               ? message
               : `${message}；自动刷新失败，请恢复连接后手动刷新`,
           );
         } else {
-          setMessage(message);
+          showErrorText(message);
         }
       }
       setBusy(false);
@@ -1105,13 +1128,13 @@ export function App() {
           current ? { ...current, remoteChanged: false } : current,
         );
       }
-      setMessage(
+      showSuccess(
         result.consistency === "atomic"
           ? "变更成功，条件版本已校验，脱敏审计已记录"
           : "变更成功；Nacos 操作为校验后变更，脱敏审计已记录",
       );
     } catch (reason) {
-      setMessage(`变更已成功，但刷新失败：${errorMessage(reason)}`);
+      showWarning(`变更已成功，但刷新失败：${errorMessage(reason)}`);
     } finally {
       setBusy(false);
     }
@@ -1126,7 +1149,7 @@ export function App() {
   const executeExport = async () => {
     if (!selectedSession || !document || busy) return;
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     try {
       const receipt = await exportResource(
         selectedSession.id,
@@ -1134,15 +1157,15 @@ export function App() {
         exportIncludeValue,
       );
       if (!receipt) {
-        setMessage("已取消导出");
+        showInfo("已取消导出");
         return;
       }
       setExportDialogOpen(false);
-      setMessage(
-        `已导出 ${receipt.fileName} · ${receipt.includeValue ? "包含 value，请按敏感文件保管" : "metadata-only，不包含 value"}`,
-      );
+      const exportMessage = `已导出 ${receipt.fileName} · ${receipt.includeValue ? "包含 value，请按敏感文件保管" : "metadata-only，不包含 value"}`;
+      if (receipt.includeValue) showWarning(exportMessage);
+      else showSuccess(exportMessage);
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -1151,17 +1174,17 @@ export function App() {
   const chooseImportFile = async () => {
     if (!selectedSession || busy) return;
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     try {
       const preview = await chooseImport(selectedSession.id);
       if (!preview) {
-        setMessage("已取消选择导入文件");
+        showInfo("已取消选择导入文件");
         return;
       }
       setImportPreview(preview);
       setImportConfirmationText("");
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -1171,7 +1194,7 @@ export function App() {
     if (!selectedSession || !importPreview || busy) return;
     const preview = importPreview;
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     const operationId = startOperation();
     try {
       const result = await applyImport(
@@ -1187,17 +1210,17 @@ export function App() {
         refreshSuffix = `；资源树刷新失败：${errorMessage(reason)}`;
       }
       if (result.failed) {
-        setMessage(
+        showWarning(
           `已写入 ${result.applied.length} 项；“${result.failed.item.name}”失败：${result.failed.error.message}；另有 ${result.remaining} 项未执行${refreshSuffix}`,
         );
       } else {
-        setMessage(
-          `导入完成：已写入 ${result.applied.length} 项，${preview.skipped} 项因不含 value 跳过；脱敏审计已记录${refreshSuffix}`,
-        );
+        const importMessage = `导入完成：已写入 ${result.applied.length} 项，${preview.skipped} 项因不含 value 跳过；脱敏审计已记录${refreshSuffix}`;
+        if (refreshSuffix) showWarning(importMessage);
+        else showSuccess(importMessage);
       }
     } catch (reason) {
       setImportPreview(undefined);
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       finishOperation(operationId);
       setBusy(false);
@@ -1223,8 +1246,7 @@ export function App() {
       );
       setHistoryCursor(page.nextCursor);
     } catch (reason) {
-      if (historyGeneration.current === generation)
-        setMessage(errorMessage(reason));
+      if (historyGeneration.current === generation) showError(reason);
     } finally {
       if (historyGeneration.current === generation) setHistoryLoading(false);
     }
@@ -1244,12 +1266,12 @@ export function App() {
     try {
       const receipt = await exportDiagnosticBundle();
       if (receipt) {
-        setMessage(
+        showSuccess(
           `诊断包 ${receipt.fileName} 已导出；仅包含 ${receipt.connectionCount} 个连接的聚合计数，不含 endpoint、名称、value 或凭据`,
         );
       }
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -1275,7 +1297,7 @@ export function App() {
   ) => {
     if (!selectedSession) return;
     setServerHistoryLoading(true);
-    setMessage(undefined);
+    clearToast();
     const operationId = operations.start("serverHistory");
     try {
       const page = await listResourceHistory(
@@ -1291,7 +1313,7 @@ export function App() {
       setServerHistoryCursor(page.nextCursor);
     } catch (reason) {
       if (operations.isCurrent("serverHistory", operationId)) {
-        setMessage(errorMessage(reason));
+        showError(reason);
       }
     } finally {
       const current = operations.isCurrent("serverHistory", operationId);
@@ -1320,7 +1342,7 @@ export function App() {
     if (!selectedSession || !serverHistoryAddress || serverHistoryLoading)
       return;
     setServerHistoryLoading(true);
-    setMessage(undefined);
+    clearToast();
     const operationId = operations.start("serverHistory");
     try {
       const detail = await readResourceHistory(
@@ -1333,7 +1355,7 @@ export function App() {
         setServerHistoryDetail(detail);
     } catch (reason) {
       if (operations.isCurrent("serverHistory", operationId)) {
-        setMessage(errorMessage(reason));
+        showError(reason);
       }
     } finally {
       const current = operations.isCurrent("serverHistory", operationId);
@@ -1360,7 +1382,7 @@ export function App() {
     }
     setNativeInfoLoading(true);
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     const operationId = startOperation();
     try {
       setNativeInfo(
@@ -1372,9 +1394,8 @@ export function App() {
       );
     } catch (reason) {
       setNativeInfoOpen(false);
-      setMessage(
-        isCancelled(reason) ? "原生元数据读取已取消" : errorMessage(reason),
-      );
+      if (isCancelled(reason)) showInfo("原生元数据读取已取消");
+      else showError(reason);
     } finally {
       finishOperation(operationId);
       setNativeInfoLoading(false);
@@ -1385,7 +1406,7 @@ export function App() {
   const executeLeaseAction = async (action: EtcdLeaseAction) => {
     if (!selectedSession || selectedProfile?.adapter !== "etcd" || busy) return;
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     const operationId = startOperation();
     try {
       const result = await executeEtcdLeaseAction(
@@ -1400,7 +1421,7 @@ export function App() {
         setNativeInfo(undefined);
         showDocument(undefined);
         setSelectedAddress(undefined);
-        setMessage(
+        showSuccess(
           `Lease ${result.leaseId} 已撤销；关联 key 已过期，脱敏审计已记录`,
         );
         return;
@@ -1410,7 +1431,7 @@ export function App() {
       setSelectedAddress(action.address);
       if (result.action === "detach") {
         setNativeInfo(undefined);
-        setMessage(
+        showSuccess(
           `Lease ${result.previousLeaseId} 已原子解绑；key 已变为永久，脱敏审计已记录`,
         );
       } else {
@@ -1425,7 +1446,7 @@ export function App() {
         } catch {
           setNativeInfo(undefined);
         }
-        setMessage(
+        showSuccess(
           result.action === "keepAlive"
             ? `Lease ${result.leaseId} 已续租一次，剩余 TTL ${result.remainingTtlSeconds} 秒；脱敏审计已记录`
             : `Lease ${result.leaseId} 已原子绑定；脱敏审计已记录`,
@@ -1457,7 +1478,7 @@ export function App() {
         }
       }
       if (isOutcomeUnknown(reason)) setNativeInfoOpen(false);
-      setMessage(
+      showErrorText(
         isOutcomeUnknown(reason)
           ? `${message}；已尽力刷新 key 与 Lease 状态，请核对后再决定下一步`
           : message,
@@ -1472,7 +1493,7 @@ export function App() {
     if (!selectedSession || selectedProfile?.adapter !== "zookeeper" || busy)
       return;
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     const operationId = startOperation();
     try {
       const result = await executeZookeeperNativeAction(
@@ -1489,7 +1510,7 @@ export function App() {
         setSelectedAddress(result.address);
         const path =
           result.address.type === "zookeeper" ? result.address.path : "新节点";
-        setMessage(`${path} 已原子创建并继承父 ACL；脱敏审计已记录`);
+        showSuccess(`${path} 已原子创建并继承父 ACL；脱敏审计已记录`);
       } else {
         setNativeInfo(
           await inspectNativeResource(
@@ -1498,7 +1519,7 @@ export function App() {
             newConnectionId(),
           ),
         );
-        setMessage(
+        showSuccess(
           `ACL 已从 aversion ${result.previousAclVersion} 原子更新到 ${result.currentAclVersion}；脱敏审计已记录`,
         );
       }
@@ -1522,7 +1543,7 @@ export function App() {
         setPendingZookeeperAction(undefined);
         setNativeInfoOpen(false);
       }
-      setMessage(
+      showErrorText(
         isOutcomeUnknown(reason)
           ? `${message}；已刷新资源树，请核对实际路径或 ACL 后再决定下一步`
           : message,
@@ -1576,12 +1597,12 @@ export function App() {
       });
       transaction = { mutations };
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
       return;
     }
 
     setBusy(true);
-    setMessage(undefined);
+    clearToast();
     const operationId = startOperation();
     try {
       const result = await executeEtcdTransaction(
@@ -1603,7 +1624,7 @@ export function App() {
       } else if (selectedResult && document) {
         showDocument(await runRead(selectedSession.id, document.address));
       }
-      setMessage(
+      showSuccess(
         `事务已在 revision ${result.revision} 原子提交 ${result.results.length} 项；脱敏审计已记录`,
       );
     } catch (reason) {
@@ -1624,7 +1645,7 @@ export function App() {
         // The original transaction error is the actionable result.
       }
       if (isOutcomeUnknown(reason)) setEtcdTransactionOpen(false);
-      setMessage(
+      showErrorText(
         isOutcomeUnknown(reason)
           ? `${message}；已尽力刷新远端状态，请核对所有目标 key 后再决定下一步`
           : message,
@@ -1660,7 +1681,7 @@ export function App() {
     setPendingZookeeperAction(undefined);
     setNacosNativeOpen(false);
     setCreateDialogOpen(false);
-    setMessage("连接已断开");
+    showSuccess("连接已断开");
   };
 
   const openNewConnection = () => {
@@ -1726,9 +1747,9 @@ export function App() {
       }
       setDialogOpen(false);
       setConnectionSecret("");
-      setMessage("连接和系统凭据已删除");
+      showSuccess("连接和系统凭据已删除");
     } catch (reason) {
-      setMessage(errorMessage(reason));
+      showError(reason);
     } finally {
       setBusy(false);
     }
@@ -2214,11 +2235,7 @@ export function App() {
         </main>
       </div>
 
-      {message && (
-        <button className="toast" onClick={() => setMessage(undefined)}>
-          {message}
-        </button>
-      )}
+      {toast && <Toast key={toast.id} toast={toast} onDismiss={dismissToast} />}
 
       {settingsOpen && (
         <SettingsDialog
@@ -2227,7 +2244,7 @@ export function App() {
             const saved = saveUpdateProxySettings(settings);
             setUpdateProxySettings(saved);
             setSettingsOpen(false);
-            setMessage("更新网络设置已保存");
+            showSuccess("更新网络设置已保存");
           }}
           onCancel={() => setSettingsOpen(false)}
         />
@@ -2374,7 +2391,7 @@ export function App() {
           <NacosNativeDialog
             profile={selectedProfile}
             connectionId={selectedSession.id}
-            onMessage={setMessage}
+            onMessage={showSuccess}
             onClose={() => setNacosNativeOpen(false)}
           />
         )}
