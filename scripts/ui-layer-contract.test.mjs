@@ -18,6 +18,12 @@ const tauriConfig = JSON.parse(
     "utf8",
   ),
 );
+const defaultCapability = JSON.parse(
+  readFileSync(
+    new URL("../src-tauri/capabilities/default.json", import.meta.url),
+    "utf8",
+  ),
+);
 const connectionAuthSource = readFileSync(
   new URL("../src/connectionAuth.ts", import.meta.url),
   "utf8",
@@ -84,7 +90,7 @@ test("macOS window chrome blends into a draggable application top bar", () => {
   assert.deepEqual(mainWindow?.trafficLightPosition, { x: 16, y: 20 });
   assert.match(
     appSource,
-    /<header\s+className="topbar"\s+data-tauri-drag-region>/,
+    /<header\s+className="topbar"\s+data-tauri-drag-region="deep">/,
   );
   assert.match(
     appSource,
@@ -101,6 +107,16 @@ test("macOS window chrome blends into a draggable application top bar", () => {
   assert.match(
     css,
     /html\[data-platform="macos"\]\s+\.topbar\s*\{[^}]*padding-left:\s*82px/s,
+  );
+});
+
+test("overlay window chrome authorizes native window dragging", () => {
+  const mainWindow = tauriConfig.app?.windows?.[0];
+
+  assert.equal(mainWindow?.titleBarStyle, "Overlay");
+  assert.ok(
+    defaultCapability.permissions.includes("core:window:allow-start-dragging"),
+    "the overlay title bar cannot move the native window without the start_dragging permission",
   );
 });
 
