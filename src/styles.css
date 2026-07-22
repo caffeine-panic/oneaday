@@ -625,14 +625,100 @@ html[data-platform="macos"] .topbar {
   right: 20px;
   bottom: 20px;
   max-width: min(540px, 80vw);
-  padding: 11px 16px;
-  border: 0;
+  max-height: min(240px, 45vh);
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 28px;
+  align-items: start;
+  gap: 10px;
+  padding: 12px 10px 12px 14px;
+  border: 1px solid transparent;
   border-radius: 10px;
-  color: #0b3229;
-  background: #dffcf5;
   box-shadow: 0 10px 30px #0008;
-  cursor: pointer;
+  overflow: auto;
+}
+.toast--success {
+  color: #0b3229;
+  border-color: #87dbc8;
+  background: #dffcf5;
+}
+.toast--info {
+  color: #163b5c;
+  border-color: #8dc7ef;
+  background: #e3f4ff;
+}
+.toast--warning {
+  color: #4d3308;
+  border-color: #e6b95b;
+  background: #fff3d4;
+}
+.toast--error {
+  color: #551c24;
+  border-color: #ee9aa7;
+  background: #ffe8ec;
+}
+.toast--auto-dismiss {
+  animation: toast-dismiss 4s linear forwards;
+}
+.toast--auto-dismiss:hover,
+.toast--auto-dismiss:focus-within {
+  animation-play-state: paused;
+}
+.toast__icon {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 800;
+}
+.toast__message {
+  padding-top: 2px;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
   text-align: left;
+}
+.toast__close {
+  width: 28px;
+  height: 28px;
+  margin-top: -3px;
+  border: 0;
+  border-radius: 7px;
+  color: currentColor;
+  background: transparent;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+.toast__close:hover,
+.toast__close:focus-visible {
+  background: #00000012;
+}
+@keyframes toast-dismiss {
+  0%,
+  85% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+@keyframes toast-dismiss-reduced-motion {
+  0%,
+  99% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast--auto-dismiss {
+    animation-name: toast-dismiss-reduced-motion;
+  }
 }
 
 .dialog-backdrop {
