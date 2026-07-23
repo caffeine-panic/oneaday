@@ -21,6 +21,12 @@ import {
   type UpdateProxySettings,
 } from "./updateSettings";
 import {
+  loadPanelLayout,
+  savePanelLayout,
+  togglePanel,
+  type PanelId,
+} from "./panelLayout";
+import {
   MutationConfirmationDialog,
   NewResourceDialog,
   type NewResourceDraft,
@@ -312,6 +318,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateProxySettings, setUpdateProxySettings] =
     useState<UpdateProxySettings>(loadUpdateProxySettings);
+  const [panelLayout, setPanelLayout] = useState(loadPanelLayout);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<ConnectionDialogMode>("new");
   const [testingConnection, setTestingConnection] = useState(false);
@@ -367,6 +374,12 @@ export function App() {
 
   const selectedProfile = profiles.find((profile) => profile.id === selectedId);
   const selectedSession = selectedId ? sessions[selectedId] : undefined;
+  const connectionsExpanded = panelLayout.connections === "expanded";
+  const resourcesExpanded = panelLayout.resources === "expanded";
+
+  const toggleNavigationPanel = (panel: PanelId) => {
+    setPanelLayout((current) => savePanelLayout(togglePanel(current, panel)));
+  };
 
   useEffect(() => {
     registryCapabilities()
@@ -1808,251 +1821,298 @@ export function App() {
         </button>
       </header>
 
-      <div className="shell">
-        <aside className="connections">
-          <div className="eyebrow">连接</div>
-          {profiles.length === 0 && (
-            <div className="empty compact">
-              <b>还没有连接</b>
-              <span>添加 etcd、ZooKeeper 或 Nacos 后开始浏览。</span>
-            </div>
-          )}
-          {profiles.map((profile) => (
-            <button
-              className={`connection ${profile.id === selectedId ? "active" : ""}`}
-              key={profile.id}
-              disabled={busy}
-              onClick={() => void selectProfile(profile)}
-            >
-              <span
-                className={`status-dot ${sessions[profile.id] ? "" : "offline"}`}
-              />
-              <span>
-                <b>{profile.name}</b>
-                <small>
-                  {profile.endpoint} ·{" "}
-                  {connectionEnvironmentLabels[profile.environment]}
-                </small>
-              </span>
-              <span className={`badge ${profile.adapter}`}>
-                {connectionLabel(profile.adapter)}
-              </span>
-            </button>
-          ))}
-
-          {selectedProfile && !selectedSession && (
-            <button
-              className="button primary wide"
-              disabled={busy}
-              onClick={() => void connectAndLoad(selectedProfile)}
-            >
-              {busy ? "连接中…" : "连接并浏览"}
-            </button>
-          )}
-          {selectedSession && (
-            <button className="button wide" onClick={() => void disconnect()}>
-              断开连接
-            </button>
-          )}
-          {selectedProfile && (
-            <div className="connection-actions">
-              <button
-                className="button"
-                disabled={busy}
-                onClick={openEditConnection}
-              >
-                编辑
-              </button>
-              <button
-                className="button"
-                disabled={busy}
-                onClick={openCopyConnection}
-              >
-                复制
-              </button>
-            </div>
-          )}
-          <button className="button wide" onClick={openNewConnection}>
-            ＋ 添加连接
+      <div
+        className="shell"
+        data-connections={panelLayout.connections}
+        data-resources={panelLayout.resources}
+      >
+        <aside className="connections" aria-label="连接">
+          <button
+            className="panel-toggle"
+            aria-controls="connections-panel-content"
+            aria-expanded={connectionsExpanded}
+            aria-label={connectionsExpanded ? "收起连接栏" : "展开连接栏"}
+            title={connectionsExpanded ? "收起连接栏" : "展开连接栏"}
+            onClick={() => toggleNavigationPanel("connections")}
+          >
+            <span aria-hidden="true">{connectionsExpanded ? "‹" : "›"}</span>
           </button>
-
-          <div className="capabilities">
-            <div className="eyebrow">NATIVE RUST ADAPTERS</div>
-            {capabilities?.map((adapter) => (
-              <span
-                className={`badge ${adapter.id}`}
-                title={adapter.capabilities.join(" · ")}
-                key={adapter.id}
-              >
-                {adapter.id} · {adapter.capabilities.length}
-              </span>
-            ))}
-          </div>
-        </aside>
-
-        <section className="tree">
-          <div className="tree-header">
-            <b>{selectedProfile?.name ?? "资源"}</b>
-            <button
-              className="icon-button import-resource"
-              disabled={!selectedSession || busy}
-              onClick={() => void chooseImportFile()}
-              title="从 Atlas JSON 导入"
-            >
-              ⇧
-            </button>
-            {selectedProfile?.adapter === "etcd" && (
-              <button
-                className="icon-button transaction-resource"
-                disabled={!selectedSession || busy}
-                onClick={openEtcdTransaction}
-                title="etcd 原子批量事务"
-              >
-                T
-              </button>
+          {!connectionsExpanded && (
+            <span className="panel-rail-label" aria-hidden="true">
+              连接
+            </span>
+          )}
+          <div
+            id="connections-panel-content"
+            className="panel-content"
+            hidden={!connectionsExpanded}
+          >
+            <div className="eyebrow">连接</div>
+            {profiles.length === 0 && (
+              <div className="empty compact">
+                <b>还没有连接</b>
+                <span>添加 etcd、ZooKeeper 或 Nacos 后开始浏览。</span>
+              </div>
             )}
-            {selectedProfile?.adapter === "nacos" && (
+            {profiles.map((profile) => (
               <button
-                className="icon-button transaction-resource"
-                disabled={!selectedSession || busy}
-                onClick={() => setNacosNativeOpen(true)}
-                title="Nacos 命名空间、服务与实例管理"
+                className={`connection ${profile.id === selectedId ? "active" : ""}`}
+                key={profile.id}
+                disabled={busy}
+                onClick={() => void selectProfile(profile)}
               >
-                N
-              </button>
-            )}
-            <button
-              className="icon-button create-resource"
-              disabled={!selectedSession || busy}
-              onClick={openCreateResource}
-              title="新建资源"
-            >
-              ＋
-            </button>
-            <button
-              className="icon-button"
-              disabled={!selectedSession || busy}
-              onClick={() => void refreshRoot()}
-              title="刷新"
-            >
-              ↻
-            </button>
-            <input
-              value={filter}
-              onChange={(event) => setFilter(event.target.value)}
-              placeholder="筛选当前已加载资源…"
-            />
-            <div className="resource-query">
-              <input
-                value={resourceQuery}
-                disabled={!selectedSession || busy}
-                onChange={(event) => setResourceQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") void searchCurrentScope();
-                }}
-                placeholder={
-                  selectedProfile?.adapter === "nacos"
-                    ? "搜索 dataId；定位请填 GROUP / dataId"
-                    : selectedProfile?.adapter === "zookeeper"
-                      ? "搜索节点名；定位请填 /绝对路径"
-                      : "搜索 key；定位可填 key 或 base64:…"
-                }
-              />
-              <button
-                className="button"
-                disabled={!selectedSession || busy}
-                onClick={() => void searchCurrentScope()}
-              >
-                搜索
-              </button>
-              <button
-                className="button"
-                disabled={!selectedSession || busy}
-                onClick={() => void locateResource()}
-              >
-                定位
-              </button>
-            </div>
-            {activeSearch && (
-              <div className="search-state">
+                <span
+                  className={`status-dot ${sessions[profile.id] ? "" : "offline"}`}
+                />
                 <span>
-                  “{activeSearch.query}” · 已检查 {activeSearch.scanned} 个标识
-                  {activeSearch.exhaustive ? " · 已完成" : ""}
+                  <b>{profile.name}</b>
+                  <small>
+                    {profile.endpoint} ·{" "}
+                    {connectionEnvironmentLabels[profile.environment]}
+                  </small>
                 </span>
-                <button disabled={busy} onClick={() => void exitSearch()}>
-                  返回资源树
+                <span className={`badge ${profile.adapter}`}>
+                  {connectionLabel(profile.adapter)}
+                </span>
+              </button>
+            ))}
+
+            {selectedProfile && !selectedSession && (
+              <button
+                className="button primary wide"
+                disabled={busy}
+                onClick={() => void connectAndLoad(selectedProfile)}
+              >
+                {busy ? "连接中…" : "连接并浏览"}
+              </button>
+            )}
+            {selectedSession && (
+              <button className="button wide" onClick={() => void disconnect()}>
+                断开连接
+              </button>
+            )}
+            {selectedProfile && (
+              <div className="connection-actions">
+                <button
+                  className="button"
+                  disabled={busy}
+                  onClick={openEditConnection}
+                >
+                  编辑
+                </button>
+                <button
+                  className="button"
+                  disabled={busy}
+                  onClick={openCopyConnection}
+                >
+                  复制
                 </button>
               </div>
             )}
-          </div>
+            <button className="button wide" onClick={openNewConnection}>
+              ＋ 添加连接
+            </button>
 
-          {!selectedSession && (
-            <div className="empty">
-              <span className="empty-icon">◇</span>
-              <b>选择并打开连接</b>
-              <span>资源会按需加载，不会扫描整个集群。</span>
-            </div>
-          )}
-          {selectedSession && rows.length === 0 && !busy && (
-            <div className="empty">
-              <span className="empty-icon">∅</span>
-              <b>{activeSearch ? "没有匹配的资源" : "当前范围没有资源"}</b>
-              <span>
-                {activeSearch
-                  ? "可调整标识关键词，搜索不会读取资源值。"
-                  : "可以刷新，或检查所选 namespace 和权限。"}
-              </span>
-            </div>
-          )}
-          {visibleRows.map((row) => {
-            const actualIndex = rows.indexOf(row);
-            if (row.kind === "more") {
-              return (
-                <button
-                  className="node load-more"
-                  style={{ paddingLeft: 14 + row.depth * 20 }}
-                  key={`more-${row.cursor}`}
-                  onClick={() => void loadMore(actualIndex, row)}
+            <div className="capabilities">
+              <div className="eyebrow">NATIVE RUST ADAPTERS</div>
+              {capabilities?.map((adapter) => (
+                <span
+                  className={`badge ${adapter.id}`}
+                  title={adapter.capabilities.join(" · ")}
+                  key={adapter.id}
                 >
-                  … 加载更多
-                </button>
-              );
-            }
-            const selected =
-              selectedAddress &&
-              JSON.stringify(selectedAddress) ===
-                JSON.stringify(row.node.address);
-            return (
+                  {adapter.id} · {adapter.capabilities.length}
+                </span>
+              ))}
+            </div>
+          </div>
+        </aside>
+
+        <section className="tree" aria-label="资源">
+          <button
+            className="panel-toggle"
+            aria-controls="resources-panel-content"
+            aria-expanded={resourcesExpanded}
+            aria-label={resourcesExpanded ? "收起资源栏" : "展开资源栏"}
+            title={resourcesExpanded ? "收起资源栏" : "展开资源栏"}
+            onClick={() => toggleNavigationPanel("resources")}
+          >
+            <span aria-hidden="true">{resourcesExpanded ? "‹" : "›"}</span>
+          </button>
+          {!resourcesExpanded && (
+            <span className="panel-rail-label" aria-hidden="true">
+              资源
+            </span>
+          )}
+          <div
+            id="resources-panel-content"
+            className="panel-content"
+            hidden={!resourcesExpanded}
+          >
+            <div className="tree-header">
+              <b>{selectedProfile?.name ?? "资源"}</b>
               <button
-                className={`node ${selected ? "active" : ""}`}
-                style={{ paddingLeft: 14 + row.depth * 20 }}
-                key={`${row.depth}-${row.node.name}-${JSON.stringify(row.node.address)}`}
-                onClick={() => void openResource(actualIndex, row)}
+                className="icon-button import-resource"
+                disabled={!selectedSession || busy}
+                onClick={() => void chooseImportFile()}
+                title="从 Atlas JSON 导入"
               >
-                <span className="disclosure">
-                  {row.node.hasChildren === false
-                    ? ""
-                    : row.expanded
-                      ? "⌄"
-                      : "›"}
-                </span>
-                <span className={row.node.readable ? "key" : "folder"}>
-                  {row.node.readable ? "◇" : "◆"}
-                </span>
-                <span className="node-name">{row.node.name}</span>
+                ⇧
               </button>
-            );
-          })}
-          {busy && (
-            <div className="loading-line">
-              正在与注册中心通信…{" "}
-              {activeOperation && (
-                <button onClick={() => void cancelActiveOperation()}>
-                  取消
+              {selectedProfile?.adapter === "etcd" && (
+                <button
+                  className="icon-button transaction-resource"
+                  disabled={!selectedSession || busy}
+                  onClick={openEtcdTransaction}
+                  title="etcd 原子批量事务"
+                >
+                  T
                 </button>
               )}
+              {selectedProfile?.adapter === "nacos" && (
+                <button
+                  className="icon-button transaction-resource"
+                  disabled={!selectedSession || busy}
+                  onClick={() => setNacosNativeOpen(true)}
+                  title="Nacos 命名空间、服务与实例管理"
+                >
+                  N
+                </button>
+              )}
+              <button
+                className="icon-button create-resource"
+                disabled={!selectedSession || busy}
+                onClick={openCreateResource}
+                title="新建资源"
+              >
+                ＋
+              </button>
+              <button
+                className="icon-button"
+                disabled={!selectedSession || busy}
+                onClick={() => void refreshRoot()}
+                title="刷新"
+              >
+                ↻
+              </button>
+              <input
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                placeholder="筛选当前已加载资源…"
+              />
+              <div className="resource-query">
+                <input
+                  value={resourceQuery}
+                  disabled={!selectedSession || busy}
+                  onChange={(event) => setResourceQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void searchCurrentScope();
+                  }}
+                  placeholder={
+                    selectedProfile?.adapter === "nacos"
+                      ? "搜索 dataId；定位请填 GROUP / dataId"
+                      : selectedProfile?.adapter === "zookeeper"
+                        ? "搜索节点名；定位请填 /绝对路径"
+                        : "搜索 key；定位可填 key 或 base64:…"
+                  }
+                />
+                <button
+                  className="button"
+                  disabled={!selectedSession || busy}
+                  onClick={() => void searchCurrentScope()}
+                >
+                  搜索
+                </button>
+                <button
+                  className="button"
+                  disabled={!selectedSession || busy}
+                  onClick={() => void locateResource()}
+                >
+                  定位
+                </button>
+              </div>
+              {activeSearch && (
+                <div className="search-state">
+                  <span>
+                    “{activeSearch.query}” · 已检查 {activeSearch.scanned}{" "}
+                    个标识
+                    {activeSearch.exhaustive ? " · 已完成" : ""}
+                  </span>
+                  <button disabled={busy} onClick={() => void exitSearch()}>
+                    返回资源树
+                  </button>
+                </div>
+              )}
             </div>
-          )}
+
+            {!selectedSession && (
+              <div className="empty">
+                <span className="empty-icon">◇</span>
+                <b>选择并打开连接</b>
+                <span>资源会按需加载，不会扫描整个集群。</span>
+              </div>
+            )}
+            {selectedSession && rows.length === 0 && !busy && (
+              <div className="empty">
+                <span className="empty-icon">∅</span>
+                <b>{activeSearch ? "没有匹配的资源" : "当前范围没有资源"}</b>
+                <span>
+                  {activeSearch
+                    ? "可调整标识关键词，搜索不会读取资源值。"
+                    : "可以刷新，或检查所选 namespace 和权限。"}
+                </span>
+              </div>
+            )}
+            {visibleRows.map((row) => {
+              const actualIndex = rows.indexOf(row);
+              if (row.kind === "more") {
+                return (
+                  <button
+                    className="node load-more"
+                    style={{ paddingLeft: 14 + row.depth * 20 }}
+                    key={`more-${row.cursor}`}
+                    onClick={() => void loadMore(actualIndex, row)}
+                  >
+                    … 加载更多
+                  </button>
+                );
+              }
+              const selected =
+                selectedAddress &&
+                JSON.stringify(selectedAddress) ===
+                  JSON.stringify(row.node.address);
+              return (
+                <button
+                  className={`node ${selected ? "active" : ""}`}
+                  style={{ paddingLeft: 14 + row.depth * 20 }}
+                  key={`${row.depth}-${row.node.name}-${JSON.stringify(row.node.address)}`}
+                  onClick={() => void openResource(actualIndex, row)}
+                >
+                  <span className="disclosure">
+                    {row.node.hasChildren === false
+                      ? ""
+                      : row.expanded
+                        ? "⌄"
+                        : "›"}
+                  </span>
+                  <span className={row.node.readable ? "key" : "folder"}>
+                    {row.node.readable ? "◇" : "◆"}
+                  </span>
+                  <span className="node-name">{row.node.name}</span>
+                </button>
+              );
+            })}
+            {busy && (
+              <div className="loading-line">
+                正在与注册中心通信…{" "}
+                {activeOperation && (
+                  <button onClick={() => void cancelActiveOperation()}>
+                    取消
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </section>
 
         <main className="detail">

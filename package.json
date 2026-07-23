@@ -1,7 +1,7 @@
 {
   "name": "atlas-registry",
   "private": true,
-  "version": "0.5.4",
+  "version": "0.5.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,7 @@
     "lint": "eslint src",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test:ui": "node --test scripts/operation-tracker.test.mjs scripts/resource-tree.test.mjs scripts/resource-workspace.test.mjs scripts/ui-layer-contract.test.mjs scripts/toast-state.test.mjs scripts/profile-selection.test.mjs scripts/registry-error.test.mjs scripts/update-settings.test.mjs scripts/updater-contract.test.mjs",
+    "test:ui": "node --test scripts/operation-tracker.test.mjs scripts/panel-layout.test.mjs scripts/resource-tree.test.mjs scripts/resource-workspace.test.mjs scripts/ui-layer-contract.test.mjs scripts/toast-state.test.mjs scripts/profile-selection.test.mjs scripts/registry-error.test.mjs scripts/update-settings.test.mjs scripts/updater-contract.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

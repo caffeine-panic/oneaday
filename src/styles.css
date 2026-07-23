@@ -159,17 +159,79 @@ html[data-platform="macos"] .topbar {
 }
 
 .shell {
+  --connections-width: 250px;
+  --resources-width: 330px;
+
   display: grid;
-  grid-template-columns: 250px 330px 1fr;
+  grid-template-columns: var(--connections-width) var(--resources-width) minmax(
+      0,
+      1fr
+    );
   height: calc(100vh - 58px);
+  transition: grid-template-columns 150ms ease;
+}
+.shell[data-connections="collapsed"] {
+  --connections-width: 42px;
+}
+.shell[data-resources="collapsed"] {
+  --resources-width: 42px;
 }
 .connections,
 .tree {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
   border-right: 1px solid #263447;
 }
 .connections {
+  background: #0b1017;
+}
+.panel-content {
+  height: 100%;
   overflow: auto;
+}
+.connections .panel-content {
   padding: 18px 13px;
+}
+.connections .panel-content > .eyebrow:first-child {
+  padding-right: 34px;
+}
+.panel-toggle {
+  position: absolute;
+  z-index: 4;
+  top: 10px;
+  right: 7px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #2c3a4d;
+  border-radius: 8px;
+  color: #91a0b2;
+  background: #121c28;
+  cursor: pointer;
+}
+.panel-toggle:hover {
+  border-color: #486079;
+  color: #e8f0f8;
+  background: #1a2838;
+}
+.panel-toggle span {
+  font-size: 20px;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+.panel-rail-label {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  color: #75869b;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  writing-mode: vertical-rl;
+  transform: translateX(-50%);
 }
 .eyebrow {
   margin-bottom: 10px;
@@ -236,9 +298,10 @@ html[data-platform="macos"] .topbar {
 }
 
 .tree {
-  overflow: auto;
-  padding: 18px 13px;
   background: #0d141e;
+}
+.tree .panel-content {
+  padding: 18px 13px;
 }
 .tree-header {
   position: sticky;
@@ -249,7 +312,7 @@ html[data-platform="macos"] .topbar {
   align-items: center;
   gap: 10px;
   margin-bottom: 12px;
-  padding: 18px 7px 10px;
+  padding: 18px 38px 10px 7px;
   background: #0d141e;
 }
 .tree-header input,
@@ -413,6 +476,7 @@ html[data-platform="macos"] .topbar {
 }
 
 .detail {
+  min-width: 0;
   overflow: auto;
   padding: 24px 28px;
 }
@@ -716,6 +780,9 @@ html[data-platform="macos"] .topbar {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .shell {
+    transition: none;
+  }
   .toast--auto-dismiss {
     animation-name: toast-dismiss-reduced-motion;
   }
@@ -1606,7 +1673,8 @@ html[data-platform="macos"] .topbar {
 
 @media (max-width: 1100px) {
   .shell {
-    grid-template-columns: 220px 290px 1fr;
+    --connections-width: 220px;
+    --resources-width: 290px;
   }
   .metadata {
     grid-template-columns: 1fr;
