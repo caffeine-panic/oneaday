@@ -177,3 +177,32 @@ test("Nacos connections offer an explicit MSE AccessKey authentication mode", ()
     "AccessKey Secret",
   );
 });
+
+test("both navigation panels can be collapsed and restored accessibly", () => {
+  assert.match(appSource, /data-connections=\{panelLayout\.connections\}/);
+  assert.match(appSource, /data-resources=\{panelLayout\.resources\}/);
+  assert.match(
+    appSource,
+    /aria-controls="connections-panel-content"[\s\S]*?aria-expanded=\{connectionsExpanded\}/,
+  );
+  assert.match(
+    appSource,
+    /aria-controls="resources-panel-content"[\s\S]*?aria-expanded=\{resourcesExpanded\}/,
+  );
+  assert.match(
+    appSource,
+    /id="connections-panel-content"[\s\S]*?hidden=\{!connectionsExpanded\}/,
+  );
+  assert.match(
+    appSource,
+    /id="resources-panel-content"[\s\S]*?hidden=\{!resourcesExpanded\}/,
+  );
+  assert.match(
+    css,
+    /\.shell\[data-connections="collapsed"\]\s*\{[^}]*--connections-width:\s*42px/s,
+  );
+  assert.match(
+    css,
+    /\.shell\[data-resources="collapsed"\]\s*\{[^}]*--resources-width:\s*42px/s,
+  );
+});
